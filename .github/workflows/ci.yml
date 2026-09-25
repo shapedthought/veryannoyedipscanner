@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri links against the system webview on Linux.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev build-essential file patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Check formatting
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Unit tests only; the live network scan test is #[ignore]d.
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Check frontend syntax
+        run: for f in ui/*.js; do node --check "$f"; done
+
+  build:
+    name: Build macOS app
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Unsigned: macOS will need a right-click > Open on first launch.
+      - name: Build bundles
+        run: npx tauri build --bundles app,dmg
+
+      - name: Zip the .app
+        working-directory: src-tauri/target/release/bundle/macos
+        run: ditto -c -k --keepParent "Very Annoyed IP Scanner.app" VeryAnnoyedIPScanner-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: very-annoyed-ip-scanner-macos
+          path: |
+            src-tauri/target/release/bundle/macos/VeryAnnoyedIPScanner-macos.zip
+            src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error

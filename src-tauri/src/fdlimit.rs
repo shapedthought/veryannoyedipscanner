@@ -23,10 +23,15 @@ static BUDGET: OnceLock<Semaphore> = OnceLock::new();
 
 /// Raise the soft open-file limit as far as the OS allows. Returns the
 /// resulting soft limit.
+// rlim_t is u64 on macOS and Linux, but not on every platform, so the casts stay.
+#[allow(clippy::unnecessary_cast)]
 pub fn raise() -> u64 {
     #[cfg(unix)]
     unsafe {
-        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
             return 256;
         }
@@ -36,7 +41,10 @@ pub fn raise() -> u64 {
             if want <= lim.rlim_cur || want > lim.rlim_max {
                 continue;
             }
-            let new = libc::rlimit { rlim_cur: want, rlim_max: lim.rlim_max };
+            let new = libc::rlimit {
+                rlim_cur: want,
+                rlim_max: lim.rlim_max,
+            };
             if libc::setrlimit(libc::RLIMIT_NOFILE, &new) == 0 {
                 return want as u64;
             }
@@ -59,7 +67,10 @@ fn budget() -> &'static Semaphore {
 
 /// Wait until `n` descriptors are available; they're returned on drop.
 pub async fn acquire(n: u32) -> SemaphorePermit<'static> {
-    budget().acquire_many(n).await.expect("fd budget semaphore is never closed")
+    budget()
+        .acquire_many(n)
+        .await
+        .expect("fd budget semaphore is never closed")
 }
 
 /// Raise the limit and size the budget up front; returns the budget size.

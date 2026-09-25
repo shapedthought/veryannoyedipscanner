@@ -1,12 +1,12 @@
 //! Service identification for open ports: passive banners, HTTP titles and
 //! TLS certificate names. Reads only - nothing is sent beyond a plain GET /.
 
+use crate::fdlimit;
 use regex::Regex;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use crate::fdlimit;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
@@ -21,9 +21,13 @@ const HTTP_WAIT: Duration = Duration::from_secs(3);
 const MAX_BODY: usize = 64 * 1024;
 
 /// Ports we speak TLS to before trying anything else.
-const TLS_PORTS: &[u16] = &[443, 465, 636, 853, 993, 995, 4443, 5001, 7443, 8006, 8443, 9443, 10443];
+const TLS_PORTS: &[u16] = &[
+    443, 465, 636, 853, 993, 995, 4443, 5001, 7443, 8006, 8443, 9443, 10443,
+];
 /// Ports where the server waits for us, so try HTTP straight away.
-const HTTP_PORTS: &[u16] = &[80, 81, 591, 3000, 5000, 7080, 8000, 8008, 8080, 8081, 8088, 8888, 9000, 9080];
+const HTTP_PORTS: &[u16] = &[
+    80, 81, 591, 3000, 5000, 7080, 8000, 8008, 8080, 8081, 8088, 8888, 9000, 9080,
+];
 /// Binary protocols where poking with HTTP gets us nothing but a hang.
 const NO_PROBE: &[u16] = &[53, 111, 135, 137, 139, 445, 3389, 5985, 5986, 62078];
 
@@ -40,6 +44,7 @@ pub struct Service {
     pub cert: Vec<String>,
 }
 
+#[rustfmt::skip]
 pub fn port_name(port: u16) -> &'static str {
     match port {
         21 => "ftp", 22 => "ssh", 23 => "telnet", 25 => "smtp", 53 => "dns",
@@ -62,7 +67,11 @@ pub async fn identify(ip: Ipv4Addr, port: u16, connect_timeout: Duration) -> Opt
     let _fds = fdlimit::acquire(fdlimit::SOCKET).await;
     let named = || {
         let name = port_name(port);
-        (!name.is_empty()).then(|| Service { port, name: name.into(), ..Default::default() })
+        (!name.is_empty()).then(|| Service {
+            port,
+            name: name.into(),
+            ..Default::default()
+        })
     };
     if NO_PROBE.contains(&port) {
         return named();
@@ -97,7 +106,10 @@ async fn passive_banner(ip: Ipv4Addr, port: u16, connect_timeout: Duration) -> O
     let text = printable(&bytes);
     let first = text.lines().next().unwrap_or("").trim();
     let (name, summary) = if let Some(rest) = first.strip_prefix("SSH-") {
-        ("ssh", rest.split_once('-').map_or(rest, |(_, v)| v).to_string())
+        (
+            "ssh",
+            rest.split_once('-').map_or(rest, |(_, v)| v).to_string(),
+        )
     } else if first.starts_with("RFB ") {
         ("vnc", first.to_string())
     } else if first.starts_with("+OK") {
@@ -105,14 +117,22 @@ async fn passive_banner(ip: Ipv4Addr, port: u16, connect_timeout: Duration) -> O
     } else if first.starts_with("* OK") {
         ("imap", first.trim_start_matches("* OK").trim().to_string())
     } else if let Some(rest) = first.strip_prefix("220") {
-        let name = if port_name(port).is_empty() { "ftp/smtp" } else { port_name(port) };
+        let name = if port_name(port).is_empty() {
+            "ftp/smtp"
+        } else {
+            port_name(port)
+        };
         (name, rest.trim_start_matches(['-', ' ']).to_string())
     } else {
         (port_name(port), first.to_string())
     };
     Some(Service {
         port,
-        name: if name.is_empty() { "banner".into() } else { name.into() },
+        name: if name.is_empty() {
+            "banner".into()
+        } else {
+            name.into()
+        },
         summary: truncate(&summary, 100),
         ..Default::default()
     })
@@ -123,7 +143,13 @@ async fn passive_banner(ip: Ipv4Addr, port: u16, connect_timeout: Duration) -> O
 fn printable(bytes: &[u8]) -> String {
     let text: String = bytes
         .iter()
-        .map(|&b| if (0x20..0x7f).contains(&b) || b == b'\n' { b as char } else { '\u{0}' })
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) || b == b'\n' {
+                b as char
+            } else {
+                '\u{0}'
+            }
+        })
         .collect();
     text.split('\u{0}')
         .filter(|run| run.trim().len() >= 4)
@@ -152,12 +178,15 @@ async fn http(ip: Ipv4Addr, port: u16, tls: bool, connect_timeout: Duration) -> 
     // Follow up to two redirects, but only while they stay on this ip:port.
     for _ in 0..3 {
         // A failed hop after a redirect still leaves us the redirect itself.
-        let Some((bytes, names)) = fetch(ip, port, tls_now, &path, connect_timeout).await else { break };
+        let Some((bytes, names)) = fetch(ip, port, tls_now, &path, connect_timeout).await else {
+            break;
+        };
         let Some(r) = parse_http(&bytes) else { break };
         if cert.is_empty() {
             cert = names;
         }
-        let redirect = (300..400).contains(&r.status) && r.title.is_empty() && !r.location.is_empty();
+        let redirect =
+            (300..400).contains(&r.status) && r.title.is_empty() && !r.location.is_empty();
         if redirect {
             note = format!("→ {}", r.location);
             if let Some((next_tls, next_path)) = follow(&r.location, ip, port, tls_now) {
@@ -196,14 +225,14 @@ fn follow(location: &str, ip: Ipv4Addr, port: u16, tls: bool) -> Option<(bool, S
     if location.starts_with('/') && !location.starts_with("//") {
         return Some((tls, location.to_string()));
     }
-    let (scheme_tls, rest) = if let Some(r) = location.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = location.strip_prefix("http://") {
-        (false, r)
-    } else {
-        return None;
+    let (scheme_tls, rest) = match location.split_once("://") {
+        Some(("https", rest)) => (true, rest),
+        Some(("http", rest)) => (false, rest),
+        _ => return None,
     };
-    let (authority, path) = rest.split_once('/').map_or((rest, "/".to_string()), |(a, p)| (a, format!("/{p}")));
+    let (authority, path) = rest
+        .split_once('/')
+        .map_or((rest, "/".to_string()), |(a, p)| (a, format!("/{p}")));
     let (host, target_port) = match authority.rsplit_once(':') {
         Some((h, p)) => (h, p.parse().ok()?),
         None => (authority, if scheme_tls { 443 } else { 80 }),
@@ -229,10 +258,13 @@ async fn fetch(
     );
     if tls {
         let name = ServerName::IpAddress(IpAddr::V4(ip).into());
-        let mut stream = timeout(HTTP_WAIT, TlsConnector::from(tls_config()).connect(name, tcp))
-            .await
-            .ok()?
-            .ok()?;
+        let mut stream = timeout(
+            HTTP_WAIT,
+            TlsConnector::from(tls_config()).connect(name, tcp),
+        )
+        .await
+        .ok()?
+        .ok()?;
         let names = stream
             .get_ref()
             .1
@@ -247,8 +279,14 @@ async fn fetch(
     }
 }
 
-async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &str) -> Option<Vec<u8>> {
-    timeout(HTTP_WAIT, stream.write_all(request.as_bytes())).await.ok()?.ok()?;
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    request: &str,
+) -> Option<Vec<u8>> {
+    timeout(HTTP_WAIT, stream.write_all(request.as_bytes()))
+        .await
+        .ok()?
+        .ok()?;
     let bytes = read_until(stream, MAX_BODY, HTTP_WAIT, |b| {
         b.windows(8).any(|w| w.eq_ignore_ascii_case(b"</title>"))
     })
@@ -275,7 +313,12 @@ fn parse_http(bytes: &[u8]) -> Option<HttpResponse> {
             }
         }
     }
-    Some(HttpResponse { status, server, location, title: extract_title(body) })
+    Some(HttpResponse {
+        status,
+        server,
+        location,
+        title: extract_title(body),
+    })
 }
 
 fn extract_title(body: &str) -> String {
@@ -320,7 +363,12 @@ impl ServerCertVerifier for AcceptAnyCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -329,7 +377,12 @@ impl ServerCertVerifier for AcceptAnyCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -382,7 +435,10 @@ fn cert_names(der: &CertificateDer<'_>) -> Vec<String> {
 
 async fn connect(ip: Ipv4Addr, port: u16, connect_timeout: Duration) -> Option<TcpStream> {
     let addr = SocketAddr::new(IpAddr::V4(ip), port);
-    timeout(connect_timeout, TcpStream::connect(addr)).await.ok()?.ok()
+    timeout(connect_timeout, TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()
 }
 
 /// Read until EOF, `limit` bytes, the deadline, or `done` says we have enough.
@@ -427,15 +483,24 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nServer: nginx/1.25\r\nContent-Type: text/html\r\n\r\n\
                     <html><head><TITLE>\n  Synology &amp; Friends\n</TITLE>";
         let r = parse_http(raw).unwrap();
-        assert_eq!((r.status, r.server.as_str(), r.title.as_str()), (200, "nginx/1.25", "Synology & Friends"));
+        assert_eq!(
+            (r.status, r.server.as_str(), r.title.as_str()),
+            (200, "nginx/1.25", "Synology & Friends")
+        );
         assert!(parse_http(b"SSH-2.0-OpenSSH").is_none());
     }
 
     #[test]
     fn follows_only_same_origin() {
         let ip: Ipv4Addr = "10.0.0.5".parse().unwrap();
-        assert_eq!(follow("/login", ip, 8080, false), Some((false, "/login".into())));
-        assert_eq!(follow("https://10.0.0.5:8080/x", ip, 8080, false), Some((true, "/x".into())));
+        assert_eq!(
+            follow("/login", ip, 8080, false),
+            Some((false, "/login".into()))
+        );
+        assert_eq!(
+            follow("https://10.0.0.5:8080/x", ip, 8080, false),
+            Some((true, "/x".into()))
+        );
         assert_eq!(follow("https://10.0.0.5/", ip, 80, false), None);
         assert_eq!(follow("http://nas.local/", ip, 80, false), None);
     }
@@ -456,10 +521,17 @@ mod tests {
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf).await;
             let _ = s
-                .write_all(b"HTTP/1.0 200 OK\r\nServer: Grumpy/1.0\r\n\r\n<title>Hello there</title>")
+                .write_all(
+                    b"HTTP/1.0 200 OK\r\nServer: Grumpy/1.0\r\n\r\n<title>Hello there</title>",
+                )
                 .await;
         });
-        let svc = http(Ipv4Addr::LOCALHOST, port, false, Duration::from_secs(1)).await.unwrap();
-        assert_eq!((svc.name.as_str(), svc.summary.as_str(), svc.server.as_str()), ("http", "Hello there", "Grumpy/1.0"));
+        let svc = http(Ipv4Addr::LOCALHOST, port, false, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            (svc.name.as_str(), svc.summary.as_str(), svc.server.as_str()),
+            ("http", "Hello there", "Grumpy/1.0")
+        );
     }
 }

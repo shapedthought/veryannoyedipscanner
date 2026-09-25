@@ -47,7 +47,9 @@ struct ScanStarted {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 fn db_err(e: rusqlite::Error) -> String {
@@ -84,7 +86,10 @@ fn start_scan(
     let threads = threads.clamp(1, 1024);
 
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let cancel = Cancel { current: state.generation.clone(), generation };
+    let cancel = Cancel {
+        current: state.generation.clone(),
+        generation,
+    };
     let total = ips.len();
     let range_start = ips.first().map(Ipv4Addr::to_string).unwrap_or_default();
     let range_end = ips.last().map(Ipv4Addr::to_string).unwrap_or_default();
@@ -95,7 +100,11 @@ fn start_scan(
         let mut tasks = JoinSet::new();
         let mut results = Vec::new();
         for ip in ips {
-            let permit = permits.clone().acquire_owned().await.expect("semaphore open");
+            let permit = permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore open");
             if cancel.is_cancelled() {
                 break;
             }
@@ -104,7 +113,13 @@ fn start_scan(
                 let host = scanner::scan_host(ip, &ports, timeout_ms, banners, &cancel).await;
                 drop(permit);
                 if !cancel.is_cancelled() {
-                    let _ = app.emit("scan-row", RowEvent { generation, host: host.clone() });
+                    let _ = app.emit(
+                        "scan-row",
+                        RowEvent {
+                            generation,
+                            host: host.clone(),
+                        },
+                    );
                 }
                 host
             });
@@ -117,7 +132,13 @@ fn start_scan(
         }
 
         let cancelled = cancel.is_cancelled();
-        let mut event = DoneEvent { generation, cancelled, scan_id: None, diff: None, error: None };
+        let mut event = DoneEvent {
+            generation,
+            cancelled,
+            scan_id: None,
+            diff: None,
+            error: None,
+        };
         // A partial scan would make everything it didn't reach look "gone",
         // so only complete scans go into history.
         if !cancelled {
@@ -145,7 +166,11 @@ fn start_scan(
     Ok(ScanStarted { generation, total })
 }
 
-fn save_and_diff(app: &AppHandle, mut summary: ScanSummary, hosts: &[HostResult]) -> Result<(i64, Option<Diff>), String> {
+fn save_and_diff(
+    app: &AppHandle,
+    mut summary: ScanSummary,
+    hosts: &[HostResult],
+) -> Result<(i64, Option<Diff>), String> {
     let db = app.state::<Db>();
     let mut conn = db.conn()?;
     let id = history::save(&mut conn, &summary, hosts).map_err(db_err)?;
@@ -164,10 +189,18 @@ fn stop_scan(state: State<'_, ScanState>) {
 }
 
 #[tauri::command]
-async fn rescan_host(ip: String, ports: String, timeout_ms: u64, banners: bool) -> Result<HostResult, String> {
+async fn rescan_host(
+    ip: String,
+    ports: String,
+    timeout_ms: u64,
+    banners: bool,
+) -> Result<HostResult, String> {
     let ip: Ipv4Addr = ip.parse().map_err(|_| format!("'{ip}' is not an IP."))?;
     let ports = scanner::parse_ports(&ports)?;
-    let cancel = Cancel { current: Arc::new(AtomicU64::new(0)), generation: 0 };
+    let cancel = Cancel {
+        current: Arc::new(AtomicU64::new(0)),
+        generation: 0,
+    };
     Ok(scanner::scan_host(ip, &ports, timeout_ms.clamp(50, 30_000), banners, &cancel).await)
 }
 
@@ -212,7 +245,9 @@ async fn save_csv(app: AppHandle, content: String) -> Result<Option<String>, Str
         return Ok(None);
     };
     let path = path.into_path().map_err(|e| e.to_string())?;
-    tokio::fs::write(&path, content).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, content)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(Some(path.display().to_string()))
 }
 

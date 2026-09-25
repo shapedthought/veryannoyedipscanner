@@ -95,18 +95,31 @@ pub fn ip_range(start: &str, end: &str) -> Result<Vec<Ipv4Addr>, String> {
 }
 
 pub fn cidr_range(cidr: &str) -> Result<Range, String> {
-    let bad = || format!("'{}' isn't a CIDR. Try something like 192.168.1.0/24.", cidr.trim());
+    let bad = || {
+        format!(
+            "'{}' isn't a CIDR. Try something like 192.168.1.0/24.",
+            cidr.trim()
+        )
+    };
     let (ip, prefix) = cidr.trim().split_once('/').ok_or_else(bad)?;
     let ip = u32::from(ip.trim().parse::<Ipv4Addr>().map_err(|_| bad())?);
     let prefix: u32 = prefix.trim().parse().map_err(|_| bad())?;
     if prefix > 32 {
         return Err(bad());
     }
-    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
     let net = ip & mask;
     let bcast = net | !mask;
     // Skip network/broadcast addresses unless the block is too small to have any.
-    let (start, end) = if prefix >= 31 { (net, bcast) } else { (net + 1, bcast - 1) };
+    let (start, end) = if prefix >= 31 {
+        (net, bcast)
+    } else {
+        (net + 1, bcast - 1)
+    };
     Ok(Range {
         start: Ipv4Addr::from(start).to_string(),
         end: Ipv4Addr::from(end).to_string(),
@@ -147,7 +160,13 @@ async fn ping(ip: Ipv4Addr, timeout_ms: u64) -> Option<f64> {
     } else if cfg!(target_os = "macos") {
         cmd.args(["-c", "1", "-W", &timeout_ms.to_string(), &ip_s]);
     } else {
-        cmd.args(["-c", "1", "-W", &(timeout_ms / 1000).max(1).to_string(), &ip_s]);
+        cmd.args([
+            "-c",
+            "1",
+            "-W",
+            &(timeout_ms / 1000).max(1).to_string(),
+            &ip_s,
+        ]);
     }
     cmd.kill_on_drop(true);
     let _fds = fdlimit::acquire(fdlimit::PROCESS).await;
@@ -183,7 +202,9 @@ async fn open_ports(ip: Ipv4Addr, ports: &[u16], timeout_ms: u64, cancel: &Cance
         if cancel.is_cancelled() {
             break;
         }
-        let checks = batch.iter().map(|&p| async move { (p, tcp_open(ip, p, timeout_ms).await) });
+        let checks = batch
+            .iter()
+            .map(|&p| async move { (p, tcp_open(ip, p, timeout_ms).await) });
         open.extend(
             futures::future::join_all(checks)
                 .await
@@ -239,13 +260,19 @@ fn mac_from_ifconfig(output: &str, ip: &str) -> Option<String> {
         }
     }
     let block = blocks.iter().find(|b| b.contains(&needle))?;
-    let ether = block.lines().find(|l| l.trim_start().starts_with("ether "))?;
+    let ether = block
+        .lines()
+        .find(|l| l.trim_start().starts_with("ether "))?;
     mac_re().find(ether).map(|m| normalise_mac(m.as_str()))
 }
 
 async fn mac_address(ip: Ipv4Addr) -> String {
     let ip_s = ip.to_string();
-    let flag = if cfg!(target_os = "windows") { "-a" } else { "-n" };
+    let flag = if cfg!(target_os = "windows") {
+        "-a"
+    } else {
+        "-n"
+    };
     let arp = run("arp", &[flag, &ip_s]).await;
     if let Some(m) = mac_re().find(&arp) {
         return normalise_mac(m.as_str());
@@ -259,7 +286,12 @@ async fn mac_address(ip: Ipv4Addr) -> String {
     String::new()
 }
 
-async fn identify_services(ip: Ipv4Addr, ports: &[u16], timeout_ms: u64, cancel: &Cancel) -> Vec<Service> {
+async fn identify_services(
+    ip: Ipv4Addr,
+    ports: &[u16],
+    timeout_ms: u64,
+    cancel: &Cancel,
+) -> Vec<Service> {
     if cancel.is_cancelled() {
         return Vec::new();
     }
@@ -279,16 +311,38 @@ pub async fn scan_host(
     cancel: &Cancel,
 ) -> HostResult {
     // Hosts that drop ICMP may still have open ports, so probe both at once.
-    let (ping_ms, ports) = tokio::join!(ping(ip, timeout_ms), open_ports(ip, ports, timeout_ms, cancel));
+    let (ping_ms, ports) = tokio::join!(
+        ping(ip, timeout_ms),
+        open_ports(ip, ports, timeout_ms, cancel)
+    );
     let alive = ping_ms.is_some() || !ports.is_empty();
     if !alive || cancel.is_cancelled() {
-        return HostResult { ip: ip.to_string(), alive, ping_ms, ports, ..Default::default() };
+        return HostResult {
+            ip: ip.to_string(),
+            alive,
+            ping_ms,
+            ports,
+            ..Default::default()
+        };
     }
     let (hostname, mac, services) = tokio::join!(reverse_dns(ip), mac_address(ip), async {
-        if banners { identify_services(ip, &ports, timeout_ms, cancel).await } else { Vec::new() }
+        if banners {
+            identify_services(ip, &ports, timeout_ms, cancel).await
+        } else {
+            Vec::new()
+        }
     });
     let vendor = vendor::lookup(&mac);
-    HostResult { ip: ip.to_string(), alive, ping_ms, hostname, mac, vendor, ports, services }
+    HostResult {
+        ip: ip.to_string(),
+        alive,
+        ping_ms,
+        hostname,
+        mac,
+        vendor,
+        ports,
+        services,
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +361,10 @@ mod tests {
         let out = "lo0: flags=8049<UP,LOOPBACK> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000\n\
                    en0: flags=8863<UP,BROADCAST> mtu 1500\n\tether 3c:6:30:a:b:cd\n\
                    \tinet 192.168.0.54 netmask 0xffffff00 broadcast 192.168.0.255\n";
-        assert_eq!(mac_from_ifconfig(out, "192.168.0.54").as_deref(), Some("3C:06:30:0A:0B:CD"));
+        assert_eq!(
+            mac_from_ifconfig(out, "192.168.0.54").as_deref(),
+            Some("3C:06:30:0A:0B:CD")
+        );
         assert_eq!(mac_from_ifconfig(out, "127.0.0.1"), None);
     }
 
@@ -316,14 +373,19 @@ mod tests {
         assert_eq!(ip_range("10.0.0.5", "10.0.0.1").unwrap().len(), 5);
         assert!(ip_range("10.0.0.0", "10.2.0.0").is_err());
         let r = cidr_range("192.168.4.77/24").unwrap();
-        assert_eq!((r.start.as_str(), r.end.as_str(), r.cidr.as_str()),
-                   ("192.168.4.1", "192.168.4.254", "192.168.4.0/24"));
+        assert_eq!(
+            (r.start.as_str(), r.end.as_str(), r.cidr.as_str()),
+            ("192.168.4.1", "192.168.4.254", "192.168.4.0/24")
+        );
         assert_eq!(cidr_range("10.0.0.1/32").unwrap().start, "10.0.0.1");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn localhost_is_alive() {
-        let cancel = Cancel { current: Arc::new(AtomicU64::new(1)), generation: 1 };
+        let cancel = Cancel {
+            current: Arc::new(AtomicU64::new(1)),
+            generation: 1,
+        };
         let r = scan_host(Ipv4Addr::LOCALHOST, &[1], 500, true, &cancel).await;
         assert!(r.alive);
         assert!(r.ping_ms.is_some());
