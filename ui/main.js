@@ -35,7 +35,7 @@ const el = {
   start: $("start"), end: $("end"), cidr: $("cidr"), apply: $("apply"),
   scan: $("scan"), ports: $("ports"), timeout: $("timeout"), threads: $("threads"),
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
-  attempts: $("attempts"), trustArp: $("trustArp"),
+  attempts: $("attempts"), trustArp: $("trustArp"), discover: $("discover"),
   rows: $("rows"), empty: $("empty"),
   status: $("status"), counts: $("counts"), progress: $("progress"),
   menu: $("menu"), toast: $("toast"),
@@ -101,6 +101,7 @@ function scanOptions() {
     attempts: Number(el.attempts.value) || 1,
     banners: el.banners.checked,
     trustArp: el.trustArp.checked,
+    discover: el.discover.checked,
   };
 }
 
@@ -128,8 +129,8 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 /** The most useful one-liner per host: page titles and versions first, then
  *  redirect notes ("→ …"), then bare protocol names. */
 function details(host) {
-  const seen = new Set();
-  const parts = [];
+  const seen = new Set(host.discovered ?? []);
+  const parts = [...seen];
   const rank = (s) => (!s.summary ? 2 : s.summary.startsWith("→") ? 1 : 0);
   const ranked = [...(host.services ?? [])].sort((a, b) => rank(a) - rank(b) || a.port - b.port);
   for (const s of ranked) {
@@ -148,7 +149,7 @@ function cell(host, col) {
       if (host.ping_ms != null) return `${Math.round(host.ping_ms)} ms`;
       if (!host.alive) return "[dead]";
       // Alive without an echo reply: say what gave it away.
-      return { arp: "[arp]", port: "[port]" }[host.alive_via] ?? "[n/a]";
+      return { arp: "[arp]", port: "[port]", mdns: "[mdns]" }[host.alive_via] ?? "[n/a]";
     case "ports":
       return host.ports.join(",");
     case "details":
@@ -336,6 +337,7 @@ const VIA = {
   icmp: "Alive (answered ping)",
   port: "Alive (ignored ping, but a port is open)",
   arp: "Alive (ignored ping, but answered ARP)",
+  mdns: "Alive (announced itself over mDNS/SSDP)",
 };
 const aliveVia = (host) => VIA[host.alive_via] ?? "Alive";
 
@@ -363,6 +365,10 @@ function renderHost() {
     change?.kind === "new" && [
       h("h3", {}, "New"),
       h("div", {}, `Wasn't here on ${fmtDate(state.diff.old.finished_at)}.`),
+    ],
+    host.discovered?.length > 0 && [
+      h("h3", {}, "Announced"),
+      h("div", {}, host.discovered.join(" · ")),
     ],
     h("h3", {}, `Open ports (${host.ports.length})`),
     host.ports.length
@@ -572,7 +578,7 @@ function setScanning(on) {
   el.scan.textContent = on ? "■ Stop" : "▶ Start";
   el.scan.disabled = false;
   for (const input of [el.start, el.end, el.cidr, el.apply, el.ports, el.timeout,
-                       el.threads, el.banners, el.attempts, el.trustArp]) {
+                       el.threads, el.banners, el.attempts, el.trustArp, el.discover]) {
     input.disabled = on;
   }
 }
@@ -606,7 +612,9 @@ async function toggleScan() {
     applyDiff(null);
     renderHost();
     setScanning(true);
-    setStatus(pick(GRUMBLES.start));
+    setStatus(started.discovering
+      ? "Listening for anyone who'll introduce themselves…"
+      : pick(GRUMBLES.start));
   } catch (err) {
     toast(`I can't work with this.\n${err}`, true);
   }

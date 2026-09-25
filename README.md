@@ -14,6 +14,10 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   moves (matched by MAC), MAC changes on the same IP, and ports opened/closed.
   Changed rows get badges; details live in the side panel (Host / Changes /
   History), where you can also view or compare any two saved scans.
+- **Listens before it sweeps**: an mDNS/Bonjour and SSDP/UPnP round at the start
+  of each scan, so devices introduce themselves. Gives real names
+  (`LGwebOSTV`, `Edwards-MacBook-Pro`) and service labels (AirPlay, HomeKit,
+  Printer, Chromecast), and finds devices that answer nothing else.
 - **Finds hosts that ignore ping**: a completed ARP entry counts as proof a
   device exists (Windows boxes, printers, cameras), shown as `[arp]` in the
   Ping column. Configurable ping retries catch Wi-Fi devices in power-save.
