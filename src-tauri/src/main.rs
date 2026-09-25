@@ -1,13 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod arp;
 mod fdlimit;
 mod history;
+mod icmp;
 mod probe;
 mod scanner;
 mod vendor;
 
 use history::{Db, Diff, SavedScan, ScanSummary};
-use scanner::{Cancel, HostResult, Range};
+use scanner::{Cancel, HostResult, Options, Range};
 use serde::Serialize;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,20 +71,18 @@ fn cidr_range(cidr: String) -> Result<Range, String> {
 /// Kick off a scan in the background; results stream back as `scan-row`
 /// events and a final `scan-done` carrying the saved id and any diff.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 fn start_scan(
     app: AppHandle,
     state: State<'_, ScanState>,
     start: String,
     end: String,
     ports: String,
-    timeout_ms: u64,
     threads: usize,
-    banners: bool,
+    options: Options,
 ) -> Result<ScanStarted, String> {
     let ips = scanner::ip_range(&start, &end)?;
     let ports = Arc::new(scanner::parse_ports(&ports)?);
-    let timeout_ms = timeout_ms.clamp(50, 30_000);
+    let options = options.sanitised();
     let threads = threads.clamp(1, 1024);
 
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -110,7 +110,7 @@ fn start_scan(
             }
             let (app, ports, cancel) = (app.clone(), ports.clone(), cancel.clone());
             tasks.spawn(async move {
-                let host = scanner::scan_host(ip, &ports, timeout_ms, banners, &cancel).await;
+                let host = scanner::scan_host(ip, &ports, &options, &cancel).await;
                 drop(permit);
                 if !cancel.is_cancelled() {
                     let _ = app.emit(
@@ -189,19 +189,14 @@ fn stop_scan(state: State<'_, ScanState>) {
 }
 
 #[tauri::command]
-async fn rescan_host(
-    ip: String,
-    ports: String,
-    timeout_ms: u64,
-    banners: bool,
-) -> Result<HostResult, String> {
+async fn rescan_host(ip: String, ports: String, options: Options) -> Result<HostResult, String> {
     let ip: Ipv4Addr = ip.parse().map_err(|_| format!("'{ip}' is not an IP."))?;
     let ports = scanner::parse_ports(&ports)?;
     let cancel = Cancel {
         current: Arc::new(AtomicU64::new(0)),
         generation: 0,
     };
-    Ok(scanner::scan_host(ip, &ports, timeout_ms.clamp(50, 30_000), banners, &cancel).await)
+    Ok(scanner::scan_host(ip, &ports, &options.sanitised(), &cancel).await)
 }
 
 #[tauri::command]

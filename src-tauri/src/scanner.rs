@@ -1,6 +1,8 @@
 //! Host probing: ping, TCP port checks, reverse DNS and ARP lookups.
 
+use crate::arp;
 use crate::fdlimit;
+use crate::icmp;
 use crate::probe::{self, Service};
 use crate::vendor;
 use regex::Regex;
@@ -25,6 +27,9 @@ pub struct HostResult {
     pub ping_ms: Option<f64>,
     pub hostname: String,
     pub mac: String,
+    /// What proved the host exists: "icmp", "port" or "arp".
+    #[serde(default)]
+    pub alive_via: String,
     #[serde(default)]
     pub vendor: String,
     pub ports: Vec<u16>,
@@ -37,6 +42,44 @@ pub struct Range {
     pub start: String,
     pub end: String,
     pub cidr: String,
+}
+
+/// Everything the user can tune about a scan.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Options {
+    pub timeout_ms: u64,
+    /// Echo requests per host before giving up. Dozing Wi-Fi devices routinely
+    /// miss the first one.
+    pub attempts: u8,
+    pub banners: bool,
+    /// Treat a completed ARP entry as proof a host exists.
+    pub trust_arp: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 800,
+            attempts: 2,
+            banners: true,
+            trust_arp: true,
+        }
+    }
+}
+
+impl Options {
+    pub fn sanitised(self) -> Self {
+        Self {
+            timeout_ms: self.timeout_ms.clamp(50, 30_000),
+            attempts: self.attempts.clamp(1, 10),
+            ..self
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms)
+    }
 }
 
 /// Cancellation token: a scan is live while the shared generation still
@@ -152,7 +195,25 @@ fn mac_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"([0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}").unwrap())
 }
 
-async fn ping(ip: Ipv4Addr, timeout_ms: u64) -> Option<f64> {
+/// Ping until one attempt answers. Prefers an unprivileged ICMP socket,
+/// which needs no process and one descriptor for the whole scan.
+async fn ping(ip: Ipv4Addr, opts: &Options, cancel: &Cancel) -> Option<f64> {
+    for attempt in 0..opts.attempts {
+        if attempt > 0 && cancel.is_cancelled() {
+            break;
+        }
+        let rtt = match icmp::shared() {
+            Some(pinger) => pinger.ping(ip, opts.timeout()).await,
+            None => ping_command(ip, opts.timeout_ms).await,
+        };
+        if rtt.is_some() {
+            return rtt;
+        }
+    }
+    None
+}
+
+async fn ping_command(ip: Ipv4Addr, timeout_ms: u64) -> Option<f64> {
     let ip_s = ip.to_string();
     let mut cmd = Command::new("ping");
     if cfg!(target_os = "windows") {
@@ -224,7 +285,7 @@ async fn reverse_dns(ip: Ipv4Addr) -> String {
     }
 }
 
-async fn run(program: &str, args: &[&str]) -> String {
+pub(crate) async fn run(program: &str, args: &[&str]) -> String {
     let _fds = fdlimit::acquire(fdlimit::PROCESS).await;
     let out = timeout(
         Duration::from_secs(2),
@@ -268,14 +329,8 @@ fn mac_from_ifconfig(output: &str, ip: &str) -> Option<String> {
 
 async fn mac_address(ip: Ipv4Addr) -> String {
     let ip_s = ip.to_string();
-    let flag = if cfg!(target_os = "windows") {
-        "-a"
-    } else {
-        "-n"
-    };
-    let arp = run("arp", &[flag, &ip_s]).await;
-    if let Some(m) = mac_re().find(&arp) {
-        return normalise_mac(m.as_str());
+    if let Some(mac) = arp::lookup(ip).await {
+        return mac;
     }
     // Our own address never shows up in the ARP cache; read it off the interface.
     if !cfg!(target_os = "windows") {
@@ -303,46 +358,55 @@ async fn identify_services(
         .collect()
 }
 
-pub async fn scan_host(
-    ip: Ipv4Addr,
-    ports: &[u16],
-    timeout_ms: u64,
-    banners: bool,
-    cancel: &Cancel,
-) -> HostResult {
+pub async fn scan_host(ip: Ipv4Addr, ports: &[u16], opts: &Options, cancel: &Cancel) -> HostResult {
     // Hosts that drop ICMP may still have open ports, so probe both at once.
     let (ping_ms, ports) = tokio::join!(
-        ping(ip, timeout_ms),
-        open_ports(ip, ports, timeout_ms, cancel)
+        ping(ip, opts, cancel),
+        open_ports(ip, ports, opts.timeout_ms, cancel)
     );
-    let alive = ping_ms.is_some() || !ports.is_empty();
-    if !alive || cancel.is_cancelled() {
-        return HostResult {
-            ip: ip.to_string(),
-            alive,
-            ping_ms,
-            ports,
-            ..Default::default()
-        };
+    let mut alive_via = match (ping_ms.is_some(), ports.is_empty()) {
+        (true, _) => "icmp",
+        (false, false) => "port",
+        (false, true) => "",
+    };
+    // Silent host: our pings and connects will have resolved ARP for it if it
+    // is really there, so a completed entry is evidence.
+    let mut mac = String::new();
+    if alive_via.is_empty() && opts.trust_arp && !cancel.is_cancelled() {
+        if let Some(found) = arp::lookup(ip).await {
+            mac = found;
+            alive_via = "arp";
+        }
     }
+
+    let alive = !alive_via.is_empty();
+    let mut host = HostResult {
+        ip: ip.to_string(),
+        alive,
+        ping_ms,
+        alive_via: alive_via.to_string(),
+        mac,
+        ports,
+        ..Default::default()
+    };
+    if !alive || cancel.is_cancelled() {
+        return host;
+    }
+
     let (hostname, mac, services) = tokio::join!(reverse_dns(ip), mac_address(ip), async {
-        if banners {
-            identify_services(ip, &ports, timeout_ms, cancel).await
+        if opts.banners {
+            identify_services(ip, &host.ports, opts.timeout_ms, cancel).await
         } else {
             Vec::new()
         }
     });
-    let vendor = vendor::lookup(&mac);
-    HostResult {
-        ip: ip.to_string(),
-        alive,
-        ping_ms,
-        hostname,
-        mac,
-        vendor,
-        ports,
-        services,
+    host.hostname = hostname;
+    if !mac.is_empty() {
+        host.mac = mac;
     }
+    host.vendor = vendor::lookup(&host.mac);
+    host.services = services;
+    host
 }
 
 #[cfg(test)]
@@ -386,8 +450,14 @@ mod tests {
             current: Arc::new(AtomicU64::new(1)),
             generation: 1,
         };
-        let r = scan_host(Ipv4Addr::LOCALHOST, &[1], 500, true, &cancel).await;
+        let opts = Options {
+            timeout_ms: 500,
+            attempts: 1,
+            ..Options::default()
+        };
+        let r = scan_host(Ipv4Addr::LOCALHOST, &[1], &opts, &cancel).await;
         assert!(r.alive);
         assert!(r.ping_ms.is_some());
+        assert_eq!(r.alive_via, "icmp");
     }
 }
