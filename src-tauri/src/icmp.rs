@@ -152,11 +152,11 @@ fn reply_sequence(packet: &[u8]) -> Option<u16> {
 /// Standard internet checksum (RFC 1071).
 fn checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut chunks = data.chunks_exact(2);
-    for pair in &mut chunks {
-        sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+    let (pairs, remainder) = data.as_chunks::<2>();
+    for pair in pairs {
+        sum += u32::from(u16::from_be_bytes(*pair));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = remainder {
         sum += u32::from(*last) << 8;
     }
     while sum >> 16 != 0 {
