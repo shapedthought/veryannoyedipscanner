@@ -35,6 +35,7 @@ const el = {
   start: $("start"), end: $("end"), cidr: $("cidr"), apply: $("apply"),
   scan: $("scan"), ports: $("ports"), timeout: $("timeout"), threads: $("threads"),
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
+  attempts: $("attempts"), trustArp: $("trustArp"),
   rows: $("rows"), empty: $("empty"),
   status: $("status"), counts: $("counts"), progress: $("progress"),
   menu: $("menu"), toast: $("toast"),
@@ -93,6 +94,16 @@ function fill(node, ...children) {
   node.replaceChildren(...children.flat(2).filter((c) => c != null && c !== false && c !== ""));
 }
 
+/** Scan options, as the Rust side expects them. */
+function scanOptions() {
+  return {
+    timeoutMs: Number(el.timeout.value) || 800,
+    attempts: Number(el.attempts.value) || 1,
+    banners: el.banners.checked,
+    trustArp: el.trustArp.checked,
+  };
+}
+
 const ipNum = (ip) => ip.split(".").reduce((n, o) => n * 256 + Number(o), 0);
 
 function fmtDate(ms) {
@@ -135,7 +146,9 @@ function cell(host, col) {
   switch (col) {
     case "ping":
       if (host.ping_ms != null) return `${Math.round(host.ping_ms)} ms`;
-      return host.alive ? "[n/a]" : "[dead]";
+      if (!host.alive) return "[dead]";
+      // Alive without an echo reply: say what gave it away.
+      return { arp: "[arp]", port: "[port]" }[host.alive_via] ?? "[n/a]";
     case "ports":
       return host.ports.join(",");
     case "details":
@@ -319,6 +332,13 @@ function serviceCards(host) {
   });
 }
 
+const VIA = {
+  icmp: "Alive (answered ping)",
+  port: "Alive (ignored ping, but a port is open)",
+  arp: "Alive (ignored ping, but answered ARP)",
+};
+const aliveVia = (host) => VIA[host.alive_via] ?? "Alive";
+
 function renderHost() {
   const body = el.tabs.host;
   const host = state.hosts.get(state.selected);
@@ -331,7 +351,7 @@ function renderHost() {
     h("h2", {}, host.ip, ...badges(host.ip)),
     h("div", { class: "muted" }, host.hostname || "No hostname. Mysterious."),
     h("dl", { class: "facts" },
-      h("dt", {}, "Status"), h("dd", {}, host.alive ? "Alive" : "Dead"),
+      h("dt", {}, "Status"), h("dd", {}, host.alive ? aliveVia(host) : "Dead"),
       h("dt", {}, "Ping"), h("dd", {}, cell(host, "ping")),
       h("dt", {}, "Vendor"), h("dd", {}, host.vendor || "—"),
       h("dt", {}, "MAC"), h("dd", {}, host.mac || "—"),
@@ -551,7 +571,8 @@ function setScanning(on) {
   state.scanning = on;
   el.scan.textContent = on ? "■ Stop" : "▶ Start";
   el.scan.disabled = false;
-  for (const input of [el.start, el.end, el.cidr, el.apply, el.ports, el.timeout, el.threads, el.banners]) {
+  for (const input of [el.start, el.end, el.cidr, el.apply, el.ports, el.timeout,
+                       el.threads, el.banners, el.attempts, el.trustArp]) {
     input.disabled = on;
   }
 }
@@ -568,9 +589,8 @@ async function toggleScan() {
       start: el.start.value,
       end: el.end.value,
       ports: el.ports.value,
-      timeoutMs: Number(el.timeout.value) || 800,
       threads: Number(el.threads.value) || 64,
-      banners: el.banners.checked,
+      options: scanOptions(),
     });
     Object.assign(state, {
       generation: started.generation,
@@ -636,12 +656,7 @@ listen("scan-done", async ({ payload }) => {
 async function rescan(ip) {
   setStatus(`Rescanning ${ip}. Like I don't have better things to do.`);
   try {
-    const host = await invoke("rescan_host", {
-      ip,
-      ports: el.ports.value,
-      timeoutMs: Number(el.timeout.value) || 800,
-      banners: el.banners.checked,
-    });
+    const host = await invoke("rescan_host", { ip, ports: el.ports.value, options: scanOptions() });
     const old = state.hosts.get(ip);
     if (old) state.alive += Number(host.alive) - Number(old.alive);
     state.hosts.set(ip, host);
