@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Very Annoyed IP Scanner</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="toolbar">
+    <div class="row">
+      <span class="brand" title="Very Annoyed IP Scanner">😤</span>
+      <label>IP Range
+        <input id="start" class="ip" spellcheck="false" />
+      </label>
+      <label>to
+        <input id="end" class="ip" spellcheck="false" />
+      </label>
+      <span class="sep"></span>
+      <label>CIDR
+        <input id="cidr" class="ip" spellcheck="false" />
+      </label>
+      <button id="apply" type="button">Apply</button>
+      <span class="grow"></span>
+      <button id="scan" type="button" class="primary">▶ Start</button>
+    </div>
+    <div class="row">
+      <label>Ports
+        <input id="ports" class="ports" spellcheck="false" value="22,80,443,445,3389,5000,8080,8443" />
+      </label>
+      <label>Timeout (ms)
+        <input id="timeout" type="number" min="50" max="30000" step="100" value="800" />
+      </label>
+      <label>Threads
+        <input id="threads" type="number" min="1" max="1024" value="64" />
+      </label>
+      <label class="check" title="Connect to open ports to read page titles, versions and certificate names">
+        <input id="banners" type="checkbox" checked /> Identify services
+      </label>
+      <label class="check">
+        <input id="hideDead" type="checkbox" /> Hide dead hosts
+      </label>
+      <span class="grow"></span>
+      <button id="export" type="button">Export CSV…</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <main class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th data-col="ip">IP</th>
+            <th data-col="ping">Ping</th>
+            <th data-col="hostname">Hostname</th>
+            <th data-col="vendor">Vendor</th>
+            <th data-col="mac">MAC Address</th>
+            <th data-col="ports">Ports</th>
+            <th data-col="details">Details</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty">Nothing here yet. Press Start, if you must.</div>
+    </main>
+
+    <aside id="panel" class="panel" hidden>
+      <nav class="tabs">
+        <button type="button" data-tab="host">Host</button>
+        <button type="button" data-tab="changes">Changes <span id="changeCount" class="count" hidden></span></button>
+        <button type="button" data-tab="history">History</button>
+        <span class="grow"></span>
+        <button type="button" id="closePanel" class="icon" title="Close panel">✕</button>
+      </nav>
+      <section id="tab-host" class="tab-body"></section>
+      <section id="tab-changes" class="tab-body"></section>
+      <section id="tab-history" class="tab-body"></section>
+    </aside>
+  </div>
+
+  <footer class="statusbar">
+    <span id="status">Ready. Reluctantly.</span>
+    <span class="grow"></span>
+    <span id="counts"></span>
+    <progress id="progress" value="0" max="1"></progress>
+    <button id="togglePanel" type="button" class="small">Panel</button>
+  </footer>
+
+  <ul id="menu" class="menu" hidden>
+    <li data-act="details">Show details</li>
+    <li class="divider"></li>
+    <li data-act="ip">Copy IP</li>
+    <li data-act="hostname">Copy hostname</li>
+    <li data-act="mac">Copy MAC</li>
+    <li class="divider"></li>
+    <li data-act="rescan">Rescan this host</li>
+  </ul>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="main.js"></script>
+</body>
+</html>
