@@ -36,7 +36,7 @@ const el = {
   scan: $("scan"), ports: $("ports"), timeout: $("timeout"), threads: $("threads"),
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
   attempts: $("attempts"), trustArp: $("trustArp"), discover: $("discover"),
-  auto: $("auto"),
+  auto: $("auto"), filter: $("filter"),
   rows: $("rows"), empty: $("empty"),
   status: $("status"), counts: $("counts"), progress: $("progress"),
   menu: $("menu"), toast: $("toast"),
@@ -70,6 +70,7 @@ const state = {
   autoTimer: null,      // handle for the scheduled rescan
   autoStarted: false,   // this scan was started by the timer, not by you
   tab: "host",
+  filterTerms: [],      // parsed once per keystroke, not once per row
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -195,7 +196,34 @@ function compare(a, b) {
   return ipNum(a.ip) - ipNum(b.ip);
 }
 
-const visible = (host) => host.alive || !el.hideDead.checked;
+/** The shape filter.js matches against: every searchable field, plus the
+ *  flags a row carries. */
+function filterRow(host) {
+  const device = deviceFor(host);
+  const change = state.changes.get(host.ip);
+  const flags = new Set([host.alive ? "alive" : "dead"]);
+  if (change?.kind === "new") flags.add("new");
+  if (change?.kind === "changed") flags.add("changed");
+  if (isUnknown(host)) flags.add("unknown");
+  if (host.risks?.length) flags.add("risk");
+  if (displayName(host)) flags.add("named");
+
+  const fields = {
+    ip: host.ip,
+    name: displayName(host),
+    vendor: host.vendor ?? "",
+    mac: host.mac ?? "",
+    note: device?.note ?? "",
+    details: details(host),
+    via: host.alive_via ?? "",
+    ports: host.ports ?? [],
+    flags,
+  };
+  return { ...fields, text: Object.values(fields).filter((v) => typeof v === "string").join(" ") };
+}
+
+const visible = (host) =>
+  (host.alive || !el.hideDead.checked) && hostMatches(filterRow(host), state.filterTerms);
 const rowClass = (host) => (host.ports.length ? "ports" : host.alive ? "alive" : "dead");
 
 // --------------------------------------------------------------------------
@@ -318,9 +346,16 @@ function updateChrome() {
     th.classList.toggle("asc", th.dataset.col === state.sort.col && state.sort.dir === 1);
     th.classList.toggle("desc", th.dataset.col === state.sort.col && state.sort.dir === -1);
   }
+  const hidden = state.hosts.size - state.view.length;
+  const filtered = state.filterTerms.length ? ` · ${state.view.length} match` : "";
   el.counts.textContent = state.total
-    ? `${state.done}/${state.total} scanned · ${state.alive} alive`
+    ? `${state.done}/${state.total} scanned · ${state.alive} alive${filtered}`
     : "";
+  if (state.filterTerms.length && state.hosts.size && !state.view.length) {
+    el.empty.textContent = "Nothing matches that. Try asking for less.";
+  } else if (hidden > 0 && !state.view.length) {
+    el.empty.textContent = "Every host is dead. Or hiding. Either way, not my problem.";
+  }
   el.progress.max = Math.max(state.total, 1);
   el.progress.value = state.done;
 }
@@ -975,6 +1010,11 @@ document.addEventListener("click", (e) => {
   if (!el.menu.contains(e.target)) el.menu.hidden = true;
 });
 document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+    e.preventDefault();
+    el.filter.focus();
+    el.filter.select();
+  }
   if (e.key === "Escape") {
     if (!el.menu.hidden) el.menu.hidden = true;
     else closePanel();
@@ -1009,6 +1049,18 @@ for (const input of [el.start, el.end, el.ports, el.timeout, el.threads]) {
   input.addEventListener("keydown", (e) => e.key === "Enter" && !state.scanning && toggleScan());
 }
 el.hideDead.addEventListener("change", renderAll);
+el.filter.addEventListener("input", () => {
+  state.filterTerms = parseFilter(el.filter.value);
+  renderAll();
+});
+el.filter.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && el.filter.value) {
+    e.stopPropagation(); // don't also close the panel
+    el.filter.value = "";
+    state.filterTerms = [];
+    renderAll();
+  }
+});
 el.auto.addEventListener("change", () => setSchedule(Number(el.auto.value)));
 el.exportBtn.addEventListener("click", exportCsv);
 

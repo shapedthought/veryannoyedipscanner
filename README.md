@@ -41,6 +41,9 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   on why it matters. These are outside-view inferences — nothing authenticates
   — so they report what is *exposed*, not that it is broken.
 - Colour-coded rows: red = dead, green = alive, blue = open ports
+- **Filter as you type** (⌘F): plain text searches the whole row, `port:22`,
+  `vendor:apple`, `name:`, `via:` and friends search one field, and bare words
+  like `new`, `unknown`, `risk` or `-dead` match what a row *is*. Terms combine.
 - Sortable columns, hide dead hosts, right-click to copy/rescan, CSV export
 - Complains constantly
 
@@ -53,6 +56,8 @@ npm run build    # release bundle in src-tauri/target/release/bundle/
 ```
 
 Rust tests: `cd src-tauri && cargo test`
+
+Frontend tests: `node --test ui/*.test.js`
 
 Scan history lives in the app data directory
 (`~/Library/Application Support/com.shapedthought.veryannoyedipscanner/history.sqlite` on macOS).

@@ -54,8 +54,16 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Check frontend syntax
         run: for f in ui/*.js; do node --check "$f"; done
+
+      # Unquoted so the shell expands it: node only globs by itself from 22.
+      - name: Frontend tests
+        run: node --test ui/*.test.js
 
   build:
     name: Build macOS app

@@ -101,6 +101,7 @@ input {
 input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 input.ip { width: 132px; font-variant-numeric: tabular-nums; }
 input.ports { width: 220px; }
+input.filter { width: 320px; max-width: 40vw; }
 input[type="number"] { width: 72px; }
 input[type="checkbox"] { padding: 0; }
 
