@@ -45,7 +45,7 @@ const el = {
 };
 const COLUMNS = ["ip", "ping", "hostname", "vendor", "mac", "ports", "details"];
 const HEADINGS = {
-  ip: "IP", ping: "Ping", hostname: "Hostname", vendor: "Vendor",
+  ip: "IP", ping: "Ping", hostname: "Name", vendor: "Vendor",
   mac: "MAC Address", ports: "Ports", details: "Details",
 };
 
@@ -64,6 +64,8 @@ const state = {
   diff: null,           // diff shown in the Changes tab
   changes: new Map(),   // ip -> { kind: "new" | "changed", change? }
   history: [],
+  devices: new Map(),   // device key -> { label, note, approved, ... }
+  approvalsInUse: false,
   tab: "host",
   workingGrumble: pick(GRUMBLES.working),
 };
@@ -120,6 +122,18 @@ function ago(ms) {
   return "just now";
 }
 
+/** A device outlives its address, so identity is the MAC where we have one. */
+const deviceKey = (host) => host.mac || `ip:${host.ip}`;
+const deviceFor = (host) => state.devices.get(deviceKey(host));
+
+/** Your name for it wins over the one it announces. */
+const displayName = (host) => deviceFor(host)?.label || host.hostname || "";
+
+/** Alive, and you haven't said it belongs here. Only meaningful once you've
+ *  approved something, otherwise every device is "unknown". */
+const isUnknown = (host) =>
+  state.approvalsInUse && host.alive && !deviceFor(host)?.approved;
+
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // --------------------------------------------------------------------------
@@ -154,6 +168,8 @@ function cell(host, col) {
       return host.ports.join(",");
     case "details":
       return details(host);
+    case "hostname":
+      return displayName(host);
     default:
       return host[col] ?? "";
   }
@@ -203,10 +219,13 @@ function changeLines(change) {
 }
 
 function badges(ip) {
+  const host = state.hosts.get(ip);
+  const out = host && isUnknown(host) ? [h("span", { class: "badge unknown" }, "UNKNOWN")] : [];
   const c = state.changes.get(ip);
-  if (!c) return [];
-  if (c.kind === "new") return [h("span", { class: "badge new" }, "NEW")];
-  return changeLabels(c.change).map((l) => h("span", { class: "badge change" }, l));
+  if (!c) return out;
+  if (c.kind === "new") out.push(h("span", { class: "badge new" }, "NEW"));
+  else out.push(...changeLabels(c.change).map((l) => h("span", { class: "badge change" }, l)));
+  return out;
 }
 
 function applyDiff(diff) {
@@ -370,6 +389,7 @@ function renderHost() {
       h("h3", {}, "Announced"),
       h("div", {}, host.discovered.join(" · ")),
     ],
+    deviceSection(host),
     h("h3", {}, `Open ports (${host.ports.length})`),
     host.ports.length
       ? [
@@ -379,6 +399,39 @@ function renderHost() {
         ]
       : h("p", { class: "muted" }, "None of the ports you asked about. Doors all shut."),
   );
+}
+
+/** Naming and approving, plus when this device was first and last seen. */
+function deviceSection(host) {
+  const device = deviceFor(host) ?? {};
+  const label = h("input", { type: "text", value: device.label ?? "", placeholder: host.hostname || "Give it a name" });
+  const note = h("textarea", { placeholder: "Notes, if it needs explaining" }, device.note ?? "");
+  const saved = h("span", { class: "saved", hidden: true }, "Saved");
+
+  const save = () => saveDevice(host, label.value, note.value).then(() => {
+    saved.hidden = false;
+    setTimeout(() => (saved.hidden = true), 1500);
+  });
+  label.addEventListener("keydown", (e) => e.key === "Enter" && save());
+
+  return [
+    h("h3", {}, "This device"),
+    h("label", { class: "field" }, "Name", label),
+    h("label", { class: "field" }, "Note", note),
+    h("div", { class: "device-actions" },
+      h("button", { type: "button", class: "small", onclick: save }, "Save"),
+      h("button", {
+        type: "button",
+        class: device.approved ? "small" : "small primary",
+        onclick: () => setApproved(host, !device.approved),
+      }, device.approved ? "Un-approve" : "Approve"),
+      saved,
+    ),
+    device.first_seen > 0 && h("div", { class: "sub" },
+      `First seen ${fmtDate(device.first_seen)} · last seen ${fmtDate(device.last_seen)}`),
+    !host.mac && h("div", { class: "sub" },
+      "No MAC address, so this is remembered by IP and won't follow the device."),
+  ];
 }
 
 function hostCard(host, lines, { clickable = true, note } = {}) {
@@ -429,6 +482,46 @@ function renderChanges() {
       })),
     ],
   );
+}
+
+async function refreshDevices() {
+  try {
+    const [devices, inUse] = await Promise.all([
+      invoke("list_devices"),
+      invoke("approvals_in_use"),
+    ]);
+    state.devices = new Map(devices.map((d) => [d.key, d]));
+    state.approvalsInUse = inUse;
+  } catch (err) {
+    toast(String(err), true);
+  }
+}
+
+async function saveDevice(host, label, note) {
+  const key = deviceKey(host);
+  try {
+    await invoke("set_device_label", { key, label, note });
+    await refreshDevices();
+    renderAll();
+    renderHost();
+  } catch (err) {
+    toast(String(err), true);
+  }
+}
+
+async function setApproved(host, approved) {
+  const key = deviceKey(host);
+  try {
+    await invoke("set_device_approved", { key, approved });
+    await refreshDevices();
+    renderAll();
+    renderHost();
+    setStatus(approved
+      ? `${displayName(host) || host.ip} approved. One less thing to worry about.`
+      : `${displayName(host) || host.ip} un-approved. Suspicious, are we?`);
+  } catch (err) {
+    toast(String(err), true);
+  }
 }
 
 async function refreshHistory() {
@@ -645,7 +738,7 @@ listen("scan-done", async ({ payload }) => {
   }
   if (payload.error) toast(payload.error, true);
 
-  await refreshHistory();
+  await Promise.all([refreshHistory(), refreshDevices()]);
   state.currentScan = state.history.find((s) => s.id === payload.scan_id) ?? null;
   renderHistory();
 
@@ -658,6 +751,10 @@ listen("scan-done", async ({ payload }) => {
   } else {
     setStatus(`${pick(GRUMBLES.done)}  ${tally} Since ${ago(diff.old.finished_at)}: ${diffSummary(diff)}.`);
     openPanel("changes");
+  }
+  const unknown = [...state.hosts.values()].filter(isUnknown).length;
+  if (unknown) {
+    setStatus(`${el.status.textContent} ${plural(unknown, "device")} you haven't approved.`);
   }
 });
 
@@ -728,6 +825,9 @@ el.rows.addEventListener("contextmenu", (e) => {
   if (!tr) return;
   e.preventDefault();
   select(tr.dataset.ip);
+  const host = state.hosts.get(tr.dataset.ip);
+  el.menu.querySelector('[data-act="approve"]').textContent =
+    deviceFor(host)?.approved ? "Un-approve this device" : "Approve this device";
   el.menu.hidden = false;
   const { innerWidth: w, innerHeight: ht } = window;
   const { offsetWidth: mw, offsetHeight: mh } = el.menu;
@@ -738,9 +838,14 @@ el.rows.addEventListener("contextmenu", (e) => {
 el.menu.addEventListener("click", (e) => {
   const act = e.target.dataset.act;
   const host = state.hosts.get(state.selected);
+  if (!el.menu.hidden && host) {
+    el.menu.querySelector('[data-act="approve"]').textContent =
+      deviceFor(host)?.approved ? "Un-approve this device" : "Approve this device";
+  }
   el.menu.hidden = true;
   if (!act || !host) return;
   if (act === "rescan") rescan(host.ip);
+  else if (act === "approve") setApproved(host, !deviceFor(host)?.approved);
   else if (act === "details") focusHost(host.ip);
   else copy(cell(host, act));
 });
@@ -795,4 +900,5 @@ invoke("local_range").then((r) => {
   el.cidr.value = r.cidr;
 });
 refreshHistory();
+refreshDevices().then(renderAll);
 updateChrome();

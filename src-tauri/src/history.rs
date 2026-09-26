@@ -79,6 +79,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
              PRIMARY KEY (scan_id, ip)
          );",
     )?;
+    crate::devices::create_table(&conn)?;
     Ok(conn)
 }
 
