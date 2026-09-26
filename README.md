@@ -35,6 +35,11 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   the icon, with last-scan detail, *Scan now* and *Open window* in its menu.
   Closing the window hides it rather than quitting, so scheduled scans carry
   on; quit from the menu bar when you mean it.
+- **Says what's worth a look**: telnet, exposed databases, an unauthenticated
+  Docker socket, expired or soon-to-expire certificates, obsolete TLS, login
+  pages served over plain HTTP. Each finding carries a severity and a sentence
+  on why it matters. These are outside-view inferences — nothing authenticates
+  — so they report what is *exposed*, not that it is broken.
 - Colour-coded rows: red = dead, green = alive, blue = open ports
 - Sortable columns, hide dead hosts, right-click to copy/rescan, CSV export
 - Complains constantly

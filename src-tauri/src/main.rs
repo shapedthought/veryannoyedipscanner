@@ -8,6 +8,7 @@ mod fdlimit;
 mod history;
 mod icmp;
 mod probe;
+mod risk;
 mod scanner;
 mod tray;
 mod vendor;

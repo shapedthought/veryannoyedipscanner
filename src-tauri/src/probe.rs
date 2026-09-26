@@ -42,6 +42,14 @@ pub struct Service {
     pub server: String,
     #[serde(default)]
     pub cert: Vec<String>,
+    /// Negotiated protocol, e.g. "TLS 1.2". Empty for anything but TLS.
+    #[serde(default)]
+    pub tls_version: String,
+    /// When the certificate stops being valid (unix seconds).
+    #[serde(default)]
+    pub cert_expires: Option<i64>,
+    #[serde(default)]
+    pub cert_self_signed: bool,
 }
 
 #[rustfmt::skip]
@@ -161,6 +169,15 @@ fn printable(bytes: &[u8]) -> String {
 // HTTP(S)
 // --------------------------------------------------------------------------
 
+/// What the handshake told us about the far end.
+#[derive(Default)]
+struct Tls {
+    version: String,
+    names: Vec<String>,
+    expires: Option<i64>,
+    self_signed: bool,
+}
+
 struct HttpResponse {
     status: u16,
     server: String,
@@ -171,19 +188,19 @@ struct HttpResponse {
 async fn http(ip: Ipv4Addr, port: u16, tls: bool, connect_timeout: Duration) -> Option<Service> {
     let mut path = String::from("/");
     let mut tls_now = tls;
-    let mut cert = Vec::new();
+    let mut tls_details = Tls::default();
     let mut note = String::new();
     let mut resp = None;
 
     // Follow up to two redirects, but only while they stay on this ip:port.
     for _ in 0..3 {
         // A failed hop after a redirect still leaves us the redirect itself.
-        let Some((bytes, names)) = fetch(ip, port, tls_now, &path, connect_timeout).await else {
+        let Some((bytes, details)) = fetch(ip, port, tls_now, &path, connect_timeout).await else {
             break;
         };
         let Some(r) = parse_http(&bytes) else { break };
-        if cert.is_empty() {
-            cert = names;
+        if tls_details.names.is_empty() && !details.names.is_empty() {
+            tls_details = details;
         }
         let redirect =
             (300..400).contains(&r.status) && r.title.is_empty() && !r.location.is_empty();
@@ -215,7 +232,10 @@ async fn http(ip: Ipv4Addr, port: u16, tls: bool, connect_timeout: Duration) -> 
         name: if used_tls { "https" } else { "http" }.into(),
         summary: truncate(&summary, 120),
         server: truncate(&r.server, 80),
-        cert,
+        cert: tls_details.names,
+        tls_version: tls_details.version,
+        cert_expires: tls_details.expires,
+        cert_self_signed: tls_details.self_signed,
     })
 }
 
@@ -246,7 +266,7 @@ async fn fetch(
     tls: bool,
     path: &str,
     connect_timeout: Duration,
-) -> Option<(Vec<u8>, Vec<String>)> {
+) -> Option<(Vec<u8>, Tls)> {
     let tcp = connect(ip, port, connect_timeout).await?;
     let host = match (tls, port) {
         (false, 80) | (true, 443) => ip.to_string(),
@@ -265,17 +285,20 @@ async fn fetch(
         .await
         .ok()?
         .ok()?;
-        let names = stream
-            .get_ref()
-            .1
+        let connection = stream.get_ref().1;
+        let mut details = connection
             .peer_certificates()
-            .and_then(|c| c.first())
-            .map(|c| cert_names(c))
+            .and_then(|chain| chain.first())
+            .map(inspect_cert)
             .unwrap_or_default();
-        Some((exchange(&mut stream, &request).await?, names))
+        details.version = connection
+            .protocol_version()
+            .map(tls_name)
+            .unwrap_or_default();
+        Some((exchange(&mut stream, &request).await?, details))
     } else {
         let mut tcp = tcp;
-        Some((exchange(&mut tcp, &request).await?, Vec::new()))
+        Some((exchange(&mut tcp, &request).await?, Tls::default()))
     }
 }
 
@@ -406,10 +429,22 @@ fn tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
-/// Subject CN plus DNS SANs, deduplicated, capped at five.
-fn cert_names(der: &CertificateDer<'_>) -> Vec<String> {
+fn tls_name(version: rustls::ProtocolVersion) -> String {
+    match version {
+        rustls::ProtocolVersion::TLSv1_0 => "TLS 1.0",
+        rustls::ProtocolVersion::TLSv1_1 => "TLS 1.1",
+        rustls::ProtocolVersion::TLSv1_2 => "TLS 1.2",
+        rustls::ProtocolVersion::TLSv1_3 => "TLS 1.3",
+        other => return format!("{other:?}"),
+    }
+    .to_string()
+}
+
+/// Subject CN plus DNS SANs (deduplicated, capped at five), when it expires,
+/// and whether it signed itself.
+fn inspect_cert(der: &CertificateDer<'_>) -> Tls {
     let Ok((_, cert)) = x509_parser::parse_x509_certificate(der.as_ref()) else {
-        return Vec::new();
+        return Tls::default();
     };
     let mut names: Vec<String> = cert
         .subject()
@@ -426,7 +461,12 @@ fn cert_names(der: &CertificateDer<'_>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     names.retain(|n| seen.insert(n.clone()));
     names.truncate(5);
-    names
+    Tls {
+        version: String::new(), // filled in from the connection itself
+        names,
+        expires: Some(cert.validity().not_after.timestamp()),
+        self_signed: cert.subject() == cert.issuer(),
+    }
 }
 
 // --------------------------------------------------------------------------

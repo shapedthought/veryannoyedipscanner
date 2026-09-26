@@ -224,6 +224,14 @@ function changeLines(change) {
 function badges(ip) {
   const host = state.hosts.get(ip);
   const out = host && isUnknown(host) ? [h("span", { class: "badge unknown" }, "UNKNOWN")] : [];
+  const risks = host?.risks ?? [];
+  if (risks.length) {
+    const worst = ["high", "medium", "low"].find((s) => risks.some((r) => r.severity === s));
+    out.push(h("span", {
+      class: `badge risk-${worst}`,
+      title: risks.map((r) => r.title).join(" · "),
+    }, `⚠ ${risks.length}`));
+  }
   const c = state.changes.get(ip);
   if (!c) return out;
   if (c.kind === "new") out.push(h("span", { class: "badge new" }, "NEW"));
@@ -391,6 +399,17 @@ function renderHost() {
     host.discovered?.length > 0 && [
       h("h3", {}, "Announced"),
       h("div", {}, host.discovered.join(" · ")),
+    ],
+    host.risks?.length > 0 && [
+      h("h3", {}, `Worth a look (${host.risks.length})`),
+      ...host.risks.map((finding) =>
+        h("div", { class: "finding" },
+          h("span", { class: `chip ${finding.severity}` }, finding.severity),
+          h("div", {},
+            h("div", {}, `${finding.title}${finding.port ? ` (port ${finding.port})` : ""}`),
+            h("div", { class: "why" }, finding.detail),
+          ),
+        )),
     ],
     deviceSection(host),
     h("h3", {}, `Open ports (${host.ports.length})`),
@@ -762,6 +781,10 @@ listen("scan-done", async ({ payload }) => {
   if (state.autoStarted && diff) await notifyAbout(diff);
   state.autoStarted = false;
 
+  const flagged = [...state.hosts.values()].filter((host) => host.risks?.length).length;
+  if (flagged) {
+    setStatus(`${el.status.textContent} ${plural(flagged, "device")} worth a look.`);
+  }
   const unknown = [...state.hosts.values()].filter(isUnknown).length;
   if (unknown) {
     setStatus(`${el.status.textContent} ${plural(unknown, "device")} you haven't approved.`);
