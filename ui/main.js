@@ -30,9 +30,27 @@ const GRUMBLES = {
 };
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
 
+/** Port lists worth having to hand. "Quick" is the default set. */
+const PORT_PRESETS = {
+  Quick: "22,80,443,445,3389,5000,8080,8443",
+  Web: "80,81,443,591,3000,5000,7080,8000,8008,8080,8081,8088,8443,8888,9000,9080,9443",
+  Windows: "135,137,139,445,3389,5985,5986",
+  Databases: "1433,1521,3306,5432,5984,6379,7000,7199,9042,9200,11211,27017",
+  "Remote access": "22,23,513,514,3389,5800,5900,5901,5985,6000",
+  "Home & IoT": "80,443,554,1883,5000,5353,7000,8009,8123,8883,9100,32400,62078",
+  "Top 100": [
+    7, 20, 21, 22, 23, 25, 53, 67, 80, 88, 110, 111, 123, 135, 137, 139, 143, 161, 389, 443,
+    445, 465, 500, 514, 515, 520, 548, 554, 587, 623, 631, 636, 873, 902, 989, 990, 993, 995,
+    1025, 1080, 1194, 1433, 1521, 1701, 1723, 1883, 1900, 2049, 2082, 2181, 2375, 2376, 3000,
+    3128, 3260, 3268, 3306, 3389, 4444, 4500, 5000, 5060, 5222, 5353, 5432, 5555, 5601, 5672,
+    5900, 5985, 6000, 6379, 6667, 7000, 7070, 8000, 8006, 8008, 8080, 8081, 8086, 8123, 8140,
+    8443, 8883, 8888, 9000, 9042, 9100, 9200, 9418, 9999, 10000, 11211, 27017, 32400, 49152,
+  ].join(","),
+};
+
 const $ = (id) => document.getElementById(id);
 const el = {
-  start: $("start"), end: $("end"), cidr: $("cidr"), apply: $("apply"),
+  targets: $("targets"), targetCount: $("targetCount"), preset: $("preset"),
   scan: $("scan"), ports: $("ports"), timeout: $("timeout"), threads: $("threads"),
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
   attempts: $("attempts"), trustArp: $("trustArp"), discover: $("discover"),
@@ -639,8 +657,8 @@ async function viewScan(id) {
     Object.assign(state, {
       currentScan: s, total: s.total, done: s.total, alive: s.alive, selected: null,
     });
-    el.start.value = s.range_start;
-    el.end.value = s.range_end;
+    el.targets.value = s.targets || `${s.range_start}-${s.range_end}`;
+    previewTargets();
     const base = baselineFor(s);
     applyDiff(base ? await invoke("compare_scans", { a: base.id, b: s.id }) : null);
     renderHistory();
@@ -728,7 +746,7 @@ function setScanning(on) {
   state.scanning = on;
   el.scan.textContent = on ? "■ Stop" : "▶ Start";
   el.scan.disabled = false;
-  for (const input of [el.start, el.end, el.cidr, el.apply, el.ports, el.timeout,
+  for (const input of [el.targets, el.preset, el.ports, el.timeout,
                        el.threads, el.banners, el.attempts, el.trustArp, el.discover]) {
     input.disabled = on;
   }
@@ -743,8 +761,7 @@ async function toggleScan() {
   }
   try {
     const started = await invoke("start_scan", {
-      start: el.start.value,
-      end: el.end.value,
+      targets: el.targets.value,
       ports: el.ports.value,
       threads: Number(el.threads.value) || 64,
       options: scanOptions(),
@@ -843,14 +860,22 @@ async function rescan(ip) {
   }
 }
 
-async function applyCidr() {
+/** Say what the targets add up to, so mistakes are visible before scanning. */
+async function previewTargets() {
+  const text = el.targets.value.trim();
+  if (!text) {
+    el.targetCount.textContent = "";
+    return;
+  }
   try {
-    const r = await invoke("cidr_range", { cidr: el.cidr.value });
-    el.start.value = r.start;
-    el.end.value = r.end;
-    el.cidr.value = r.cidr;
-  } catch (err) {
-    toast(String(err), true);
+    const preview = await invoke("preview_targets", { targets: text });
+    const span = preview.count > 1 ? ` (${preview.start} – ${preview.end})` : "";
+    el.targetCount.textContent = `${preview.count.toLocaleString()} addresses${span}`;
+    el.targetCount.classList.remove("error-text");
+  } catch {
+    // The full complaint can wait until they press Start.
+    el.targetCount.textContent = "not a valid target";
+    el.targetCount.classList.add("error-text");
   }
 }
 
@@ -1043,9 +1068,16 @@ el.closePanel.addEventListener("click", closePanel);
 el.togglePanel.addEventListener("click", () => (el.panel.hidden ? openPanel() : closePanel()));
 
 el.scan.addEventListener("click", toggleScan);
-el.apply.addEventListener("click", applyCidr);
-el.cidr.addEventListener("keydown", (e) => e.key === "Enter" && applyCidr());
-for (const input of [el.start, el.end, el.ports, el.timeout, el.threads]) {
+el.targets.addEventListener("input", previewTargets);
+el.preset.addEventListener("change", () => {
+  const ports = PORT_PRESETS[el.preset.value];
+  if (ports) {
+    el.ports.value = ports;
+    setStatus(`${el.preset.value}: ${ports.split(",").length} ports. Your funeral.`);
+  }
+  el.preset.value = "";
+});
+for (const input of [el.targets, el.ports, el.timeout, el.threads]) {
   input.addEventListener("keydown", (e) => e.key === "Enter" && !state.scanning && toggleScan());
 }
 el.hideDead.addEventListener("change", renderAll);
@@ -1068,10 +1100,13 @@ el.exportBtn.addEventListener("click", exportCsv);
 // Boot
 // --------------------------------------------------------------------------
 
+for (const name of Object.keys(PORT_PRESETS)) {
+  el.preset.append(h("option", { value: name }, name));
+}
+
 invoke("local_range").then((r) => {
-  el.start.value = r.start;
-  el.end.value = r.end;
-  el.cidr.value = r.cidr;
+  el.targets.value = r.cidr;
+  previewTargets();
 });
 refreshHistory();
 refreshDevices().then(renderAll);

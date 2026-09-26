@@ -138,6 +138,64 @@ fn parse_ip(s: &str) -> Result<Ipv4Addr, String> {
         .map_err(|_| format!("'{}' is not an IPv4 address. I checked.", s.trim()))
 }
 
+/// Everything one scan will visit, from a written specification.
+#[derive(Debug)]
+pub struct Targets {
+    pub ips: Vec<Ipv4Addr>,
+    /// As typed, so two scans of the same thing can be compared later.
+    pub spec: String,
+    pub start: String,
+    pub end: String,
+}
+
+/// Parse "192.168.0.0/24, 10.0.0.1-50, 10.0.1.7" into addresses to scan.
+/// Separators are commas or whitespace; overlapping pieces collapse.
+pub fn parse_targets(text: &str) -> Result<Targets, String> {
+    let mut ips: Vec<Ipv4Addr> = Vec::new();
+    for piece in text
+        .split([',', ';', ' ', '\t', '\n'])
+        .filter(|p| !p.trim().is_empty())
+    {
+        let piece = piece.trim();
+        let range = if piece.contains('/') {
+            let range = cidr_range(piece)?;
+            ip_range(&range.start, &range.end)?
+        } else if let Some((from, to)) = piece.split_once('-') {
+            ip_range(from, &expand_short_end(from, to)?)?
+        } else {
+            vec![parse_ip(piece)?]
+        };
+        ips.extend(range);
+        if ips.len() > MAX_HOSTS as usize {
+            return Err("More than 65,536 addresses? Absolutely not.".into());
+        }
+    }
+    ips.sort_unstable();
+    ips.dedup();
+    if ips.is_empty() {
+        return Err("Give me something to scan. An address, a range, a CIDR block.".into());
+    }
+    Ok(Targets {
+        start: ips.first().expect("not empty").to_string(),
+        end: ips.last().expect("not empty").to_string(),
+        spec: text.split_whitespace().collect::<Vec<_>>().join(" "),
+        ips,
+    })
+}
+
+/// "192.168.0.1-50" means up to 192.168.0.50, which is how everyone writes it.
+fn expand_short_end(from: &str, to: &str) -> Result<String, String> {
+    let to = to.trim();
+    if to.contains('.') {
+        return Ok(to.to_string());
+    }
+    let last: u8 = to.parse().map_err(|_| {
+        format!("'{to}' isn't the end of a range. I expected a number or an address.")
+    })?;
+    let start = parse_ip(from)?.octets();
+    Ok(Ipv4Addr::new(start[0], start[1], start[2], last).to_string())
+}
+
 pub fn ip_range(start: &str, end: &str) -> Result<Vec<Ipv4Addr>, String> {
     let (a, b) = (u32::from(parse_ip(start)?), u32::from(parse_ip(end)?));
     let (a, b) = (a.min(b), a.max(b));
@@ -468,6 +526,43 @@ mod tests {
             Some("3C:06:30:0A:0B:CD")
         );
         assert_eq!(mac_from_ifconfig(out, "127.0.0.1"), None);
+    }
+
+    #[test]
+    fn targets_accept_every_shape() {
+        let t = parse_targets("192.168.0.0/30, 10.0.0.1-3 10.0.1.7").unwrap();
+        assert_eq!(
+            t.ips.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "10.0.0.1",
+                "10.0.0.2",
+                "10.0.0.3",
+                "10.0.1.7",
+                "192.168.0.1",
+                "192.168.0.2"
+            ]
+        );
+        assert_eq!(
+            (t.start.as_str(), t.end.as_str()),
+            ("10.0.0.1", "192.168.0.2")
+        );
+        assert_eq!(t.spec, "192.168.0.0/30, 10.0.0.1-3 10.0.1.7");
+
+        // Overlapping pieces are scanned once.
+        let overlap = parse_targets("10.0.0.1-5, 10.0.0.3-7").unwrap();
+        assert_eq!(overlap.ips.len(), 7);
+
+        // A full address on the right of the dash still works.
+        assert_eq!(parse_targets("10.0.0.1-10.0.0.4").unwrap().ips.len(), 4);
+    }
+
+    #[test]
+    fn targets_complain_usefully() {
+        assert!(parse_targets("").is_err());
+        assert!(parse_targets("   ").is_err());
+        assert!(parse_targets("not-an-ip").is_err());
+        assert!(parse_targets("10.0.0.1-nonsense").is_err());
+        assert!(parse_targets("10.0.0.0/8").is_err(), "too many addresses");
     }
 
     #[test]

@@ -76,9 +76,22 @@ fn local_range() -> Range {
     scanner::local_range()
 }
 
+#[derive(Serialize)]
+struct TargetPreview {
+    count: usize,
+    start: String,
+    end: String,
+}
+
+/// What a target specification would scan, without scanning it.
 #[tauri::command]
-fn cidr_range(cidr: String) -> Result<Range, String> {
-    scanner::cidr_range(&cidr)
+fn preview_targets(targets: String) -> Result<TargetPreview, String> {
+    let targets = scanner::parse_targets(&targets)?;
+    Ok(TargetPreview {
+        count: targets.ips.len(),
+        start: targets.start,
+        end: targets.end,
+    })
 }
 
 /// Kick off a scan in the background; results stream back as `scan-row`
@@ -87,13 +100,12 @@ fn cidr_range(cidr: String) -> Result<Range, String> {
 fn start_scan(
     app: AppHandle,
     state: State<'_, ScanState>,
-    start: String,
-    end: String,
+    targets: String,
     ports: String,
     threads: usize,
     options: Options,
 ) -> Result<ScanStarted, String> {
-    let ips = scanner::ip_range(&start, &end)?;
+    let targets = scanner::parse_targets(&targets)?;
     let ports = Arc::new(scanner::parse_ports(&ports)?);
     let options = options.sanitised();
     let threads = threads.clamp(1, 1024);
@@ -103,9 +115,13 @@ fn start_scan(
         current: state.generation.clone(),
         generation,
     };
+    let scanner::Targets {
+        ips,
+        spec,
+        start: range_start,
+        end: range_end,
+    } = targets;
     let total = ips.len();
-    let range_start = ips.first().map(Ipv4Addr::to_string).unwrap_or_default();
-    let range_end = ips.last().map(Ipv4Addr::to_string).unwrap_or_default();
     let started_at = now_ms();
 
     tauri::async_runtime::spawn(async move {
@@ -169,6 +185,7 @@ fn start_scan(
                 id: 0,
                 started_at,
                 finished_at: now_ms(),
+                targets: spec,
                 range_start,
                 range_end,
                 ports: ports.to_vec(),
@@ -370,7 +387,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             local_range,
-            cidr_range,
+            preview_targets,
             start_scan,
             stop_scan,
             rescan_host,

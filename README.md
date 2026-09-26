@@ -2,7 +2,10 @@
 
 A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTML/JS).
 
-- Scan an IP range or CIDR block concurrently
+- Scan **several targets at once**: CIDR blocks, ranges (`10.0.0.1-50`) and
+  single addresses in one field, with a live count of what you've asked for
+- **Port presets**: Quick, Web, Windows, Databases, Remote access, Home & IoT,
+  Top 100
 - Ping, reverse DNS hostname, MAC (from the ARP cache) and open TCP ports
 - **Vendor** from the MAC address (embedded IEEE/Wireshark OUI table; randomised
   "private" MACs are flagged as such)
