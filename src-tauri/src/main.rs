@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod arp;
+mod discovery;
+mod dns;
 mod fdlimit;
 mod history;
 mod icmp;
@@ -8,13 +10,14 @@ mod probe;
 mod scanner;
 mod vendor;
 
+use discovery::Announcements;
 use history::{Db, Diff, SavedScan, ScanSummary};
 use scanner::{Cancel, HostResult, Options, Range};
 use serde::Serialize;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Semaphore;
@@ -46,7 +49,13 @@ struct DoneEvent {
 struct ScanStarted {
     generation: u64,
     total: usize,
+    /// The UI says what we're doing during the quiet opening seconds.
+    discovering: bool,
 }
+
+/// How long to listen for announcements before sweeping. Most responders
+/// answer within a second; this leaves room for the slow ones.
+const DISCOVERY_WINDOW: Duration = Duration::from_millis(2500);
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -96,6 +105,14 @@ fn start_scan(
     let started_at = now_ms();
 
     tauri::async_runtime::spawn(async move {
+        // Listen first: announcements name devices that the sweep can only
+        // describe by vendor, and turn up some it would miss entirely.
+        let announced = if options.discover {
+            Arc::new(discovery::discover(DISCOVERY_WINDOW, &cancel).await)
+        } else {
+            Arc::new(Announcements::new())
+        };
+
         let permits = Arc::new(Semaphore::new(threads));
         let mut tasks = JoinSet::new();
         let mut results = Vec::new();
@@ -109,8 +126,10 @@ fn start_scan(
                 break;
             }
             let (app, ports, cancel) = (app.clone(), ports.clone(), cancel.clone());
+            let announced = announced.clone();
             tasks.spawn(async move {
-                let host = scanner::scan_host(ip, &ports, &options, &cancel).await;
+                let mut host = scanner::scan_host(ip, &ports, &options, &cancel).await;
+                merge_announcement(&mut host, announced.get(&ip)).await;
                 drop(permit);
                 if !cancel.is_cancelled() {
                     let _ = app.emit(
@@ -163,7 +182,26 @@ fn start_scan(
         let _ = app.emit("scan-done", event);
     });
 
-    Ok(ScanStarted { generation, total })
+    Ok(ScanStarted {
+        generation,
+        total,
+        discovering: options.discover,
+    })
+}
+
+/// Fold what a device announced about itself into its scan result. A device
+/// that answered mDNS or SSDP is alive whatever the probes concluded.
+async fn merge_announcement(host: &mut HostResult, announced: Option<&discovery::Announcement>) {
+    let Some(announced) = announced else { return };
+    if host.hostname.is_empty() && !announced.name.is_empty() {
+        host.hostname = announced.name.clone();
+    }
+    host.discovered = announced.services.clone();
+    if !host.alive {
+        host.alive = true;
+        host.alive_via = "mdns".into();
+        scanner::fill_identity(host).await;
+    }
 }
 
 fn save_and_diff(
@@ -196,7 +234,13 @@ async fn rescan_host(ip: String, ports: String, options: Options) -> Result<Host
         current: Arc::new(AtomicU64::new(0)),
         generation: 0,
     };
-    Ok(scanner::scan_host(ip, &ports, &options.sanitised(), &cancel).await)
+    let options = options.sanitised();
+    let mut host = scanner::scan_host(ip, &ports, &options, &cancel).await;
+    if options.discover {
+        let announced = discovery::discover(DISCOVERY_WINDOW, &cancel).await;
+        merge_announcement(&mut host, announced.get(&ip)).await;
+    }
+    Ok(host)
 }
 
 #[tauri::command]

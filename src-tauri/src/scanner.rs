@@ -32,6 +32,9 @@ pub struct HostResult {
     pub alive_via: String,
     #[serde(default)]
     pub vendor: String,
+    /// Service labels a device announced over mDNS/SSDP ("AirPlay", "Printer").
+    #[serde(default)]
+    pub discovered: Vec<String>,
     pub ports: Vec<u16>,
     #[serde(default)]
     pub services: Vec<Service>,
@@ -55,6 +58,8 @@ pub struct Options {
     pub banners: bool,
     /// Treat a completed ARP entry as proof a host exists.
     pub trust_arp: bool,
+    /// Ask the network to introduce itself over mDNS and SSDP first.
+    pub discover: bool,
 }
 
 impl Default for Options {
@@ -62,6 +67,7 @@ impl Default for Options {
         Self {
             timeout_ms: 800,
             attempts: 2,
+            discover: true,
             banners: true,
             trust_arp: true,
         }
@@ -170,14 +176,18 @@ pub fn cidr_range(cidr: &str) -> Result<Range, String> {
     })
 }
 
+/// This machine's address on the LAN.
+pub fn local_ip() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("10.255.255.255:1").ok()?; // picks a route, sends nothing
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    }
+}
+
 pub fn local_range() -> Range {
-    let ip = UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("10.255.255.255:1")?; // picks a route, sends nothing
-            s.local_addr()
-        })
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|_| "192.168.1.1".into());
+    let ip = local_ip().map_or_else(|| "192.168.1.1".to_string(), |ip| ip.to_string());
     cidr_range(&format!("{ip}/24")).expect("valid /24")
 }
 
@@ -356,6 +366,23 @@ async fn identify_services(
         .into_iter()
         .flatten()
         .collect()
+}
+
+/// Fill in MAC, vendor and hostname for a host we didn't probe into being
+/// alive (one that only answered mDNS or SSDP).
+pub async fn fill_identity(host: &mut HostResult) {
+    let Ok(ip) = host.ip.parse::<Ipv4Addr>() else {
+        return;
+    };
+    if host.mac.is_empty() {
+        host.mac = mac_address(ip).await;
+    }
+    if host.vendor.is_empty() {
+        host.vendor = vendor::lookup(&host.mac);
+    }
+    if host.hostname.is_empty() {
+        host.hostname = reverse_dns(ip).await;
+    }
 }
 
 pub async fn scan_host(ip: Ipv4Addr, ports: &[u16], opts: &Options, cancel: &Cancel) -> HostResult {
