@@ -31,6 +31,10 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   range on a timer, sending a macOS notification when something changes —
   devices you haven't approved first, then new arrivals, ports opening, and
   departures. Scans you start yourself stay silent, since you're watching.
+- **Lives in the menu bar**: the number of devices currently up sits next to
+  the icon, with last-scan detail, *Scan now* and *Open window* in its menu.
+  Closing the window hides it rather than quitting, so scheduled scans carry
+  on; quit from the menu bar when you mean it.
 - Colour-coded rows: red = dead, green = alive, blue = open ports
 - Sortable columns, hide dead hosts, right-click to copy/rescan, CSV export
 - Complains constantly

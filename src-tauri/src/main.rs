@@ -9,6 +9,7 @@ mod history;
 mod icmp;
 mod probe;
 mod scanner;
+mod tray;
 mod vendor;
 
 use devices::Device;
@@ -20,7 +21,7 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -271,6 +272,13 @@ fn delete_scan(db: State<'_, Db>, id: i64) -> Result<(), String> {
     history::delete(&*db.conn()?, id).map_err(db_err)
 }
 
+/// Menu-bar summary: the count sits next to the icon, the sentence is the
+/// first line of its menu.
+#[tauri::command]
+fn update_tray(app: AppHandle, count: Option<String>, summary: String) {
+    tray::update(&app, count, &summary);
+}
+
 /// A native notification, sent from Rust so the page needs no permission of
 /// its own. Used for scans the user didn't start by hand.
 #[tauri::command]
@@ -349,7 +357,15 @@ fn main() {
             std::fs::create_dir_all(&dir)?;
             let conn = history::open(&dir.join("history.sqlite"))?;
             app.manage(Db(Mutex::new(conn)));
+            tray::build(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // Keep the scan loop (and any schedule) alive in the menu bar.
+                api.prevent_close();
+                tray::hide_on_close(window);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             local_range,
@@ -359,6 +375,7 @@ fn main() {
             rescan_host,
             list_scans,
             notify,
+            update_tray,
             list_devices,
             approvals_in_use,
             set_device_label,
@@ -369,6 +386,13 @@ fn main() {
             delete_scan,
             save_csv
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Very Annoyed IP Scanner");
+        .build(tauri::generate_context!())
+        .expect("error while running Very Annoyed IP Scanner")
+        .run(|app, event| {
+            // Clicking the dock icon after closing the window should bring it
+            // back, rather than doing nothing.
+            if let tauri::RunEvent::Reopen { .. } = event {
+                tray::show(app);
+            }
+        });
 }
