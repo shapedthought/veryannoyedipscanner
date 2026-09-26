@@ -101,6 +101,15 @@ input {
 input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 input.ip { width: 132px; font-variant-numeric: tabular-nums; }
 input.ports { width: 220px; }
+input.target-input { width: 340px; max-width: 34vw; font-variant-numeric: tabular-nums; }
+.toolbar select {
+  font: inherit;
+  color: var(--text);
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 5px;
+}
 input.filter { width: 320px; max-width: 40vw; }
 input[type="number"] { width: 72px; }
 input[type="checkbox"] { padding: 0; }
@@ -456,3 +465,5 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-
 
 .plus { color: var(--badge-new); font-weight: 600; }
 .minus { color: var(--accent); font-weight: 600; }
+
+.error-text { color: var(--accent); }

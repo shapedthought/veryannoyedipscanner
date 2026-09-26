@@ -9,17 +9,12 @@
   <header class="toolbar">
     <div class="row">
       <span class="brand" title="Very Annoyed IP Scanner">😤</span>
-      <label>IP Range
-        <input id="start" class="ip" spellcheck="false" />
+      <label class="targets">Targets
+        <input id="targets" class="target-input" spellcheck="false"
+               placeholder="192.168.0.0/24, 10.0.0.1-50, 10.0.1.7"
+               title="CIDR blocks, ranges and single addresses, separated by commas" />
       </label>
-      <label>to
-        <input id="end" class="ip" spellcheck="false" />
-      </label>
-      <span class="sep"></span>
-      <label>CIDR
-        <input id="cidr" class="ip" spellcheck="false" />
-      </label>
-      <button id="apply" type="button">Apply</button>
+      <span id="targetCount" class="muted"></span>
       <span class="grow"></span>
       <button id="scan" type="button" class="primary">▶ Start</button>
     </div>
@@ -27,6 +22,9 @@
       <label>Ports
         <input id="ports" class="ports" spellcheck="false" value="22,80,443,445,3389,5000,8080,8443" />
       </label>
+      <select id="preset" title="Replace the port list with a preset">
+        <option value="">Presets…</option>
+      </select>
       <label>Timeout (ms)
         <input id="timeout" type="number" min="50" max="30000" step="100" value="800" />
       </label>

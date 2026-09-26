@@ -23,6 +23,10 @@ pub struct ScanSummary {
     pub id: i64,
     pub started_at: i64,
     pub finished_at: i64,
+    /// The targets as typed, e.g. "192.168.0.0/24, 10.0.1.5". Empty for scans
+    /// saved before multi-target support.
+    #[serde(default)]
+    pub targets: String,
     pub range_start: String,
     pub range_end: String,
     pub ports: Vec<u16>,
@@ -79,6 +83,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
              PRIMARY KEY (scan_id, ip)
          );",
     )?;
+    // Added after the first release; older databases don't have it.
+    let _ = conn.execute(
+        "ALTER TABLE scans ADD COLUMN targets TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     crate::devices::create_table(&conn)?;
     Ok(conn)
 }
@@ -92,8 +101,8 @@ pub fn save(
 ) -> rusqlite::Result<i64> {
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO scans (started_at, finished_at, range_start, range_end, ports, total, alive)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO scans (started_at, finished_at, range_start, range_end, ports, total, alive, targets)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             summary.started_at,
             summary.finished_at,
@@ -102,6 +111,7 @@ pub fn save(
             serde_json::to_string(&summary.ports).unwrap(),
             summary.total,
             summary.alive,
+            summary.targets,
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -126,11 +136,12 @@ fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<ScanSummary> {
         ports: serde_json::from_str(&ports).unwrap_or_default(),
         total: row.get(6)?,
         alive: row.get(7)?,
+        targets: row.get(8)?,
     })
 }
 
 const SUMMARY_COLS: &str =
-    "id, started_at, finished_at, range_start, range_end, ports, total, alive";
+    "id, started_at, finished_at, range_start, range_end, ports, total, alive, targets";
 
 pub fn list(conn: &Connection) -> rusqlite::Result<Vec<ScanSummary>> {
     let mut stmt = conn.prepare(&format!(
@@ -163,10 +174,15 @@ pub fn delete(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 /// The most recent earlier scan of exactly the same range, used as the
 /// automatic baseline for "what changed since last time".
 pub fn baseline_for(conn: &Connection, scan: &ScanSummary) -> rusqlite::Result<Option<i64>> {
+    // Match on the written targets where we have them, so "the same scan"
+    // means the same instruction rather than a coincidentally equal span.
     conn.query_row(
-        "SELECT id FROM scans WHERE range_start = ?1 AND range_end = ?2 AND id < ?3
+        "SELECT id FROM scans
+         WHERE id < ?1
+           AND CASE WHEN ?2 != '' AND targets != '' THEN targets = ?2
+                    ELSE range_start = ?3 AND range_end = ?4 END
          ORDER BY id DESC LIMIT 1",
-        params![scan.range_start, scan.range_end, scan.id],
+        params![scan.id, scan.targets, scan.range_start, scan.range_end],
         |row| row.get(0),
     )
     .optional()
@@ -322,6 +338,7 @@ mod tests {
                 id,
                 started_at: 0,
                 finished_at: 0,
+                targets: "10.0.0.1-254".into(),
                 range_start: "10.0.0.1".into(),
                 range_end: "10.0.0.254".into(),
                 ports: vec![22, 80, 443],
@@ -379,6 +396,90 @@ mod tests {
             by_ip["10.0.0.5"].old_mac.as_deref(),
             Some("AA:00:00:00:00:05")
         );
+    }
+
+    /// A database written before multi-target support must keep working.
+    #[test]
+    fn migrates_a_database_without_targets() {
+        let dir = std::env::temp_dir().join(format!("vais-migration-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.sqlite");
+        let _ = std::fs::remove_file(&path);
+
+        // The original schema, as shipped in v0.1.0.
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE scans (
+                 id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL,
+                 finished_at INTEGER NOT NULL, range_start TEXT NOT NULL,
+                 range_end TEXT NOT NULL, ports TEXT NOT NULL,
+                 total INTEGER NOT NULL, alive INTEGER NOT NULL);
+             INSERT INTO scans VALUES (1, 10, 20, '10.0.0.1', '10.0.0.254', '[22]', 254, 3);
+             CREATE TABLE hosts (scan_id INTEGER NOT NULL, ip TEXT NOT NULL, data TEXT NOT NULL,
+                 PRIMARY KEY (scan_id, ip));",
+        )
+        .unwrap();
+        drop(old);
+
+        let conn = open(&path).unwrap();
+        let scans = list(&conn).unwrap();
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].targets, "", "old rows have no written targets");
+
+        // And an old scan is still a valid baseline for a new one of the same span.
+        let mut conn = conn;
+        let next = ScanSummary {
+            id: 0,
+            targets: "10.0.0.1-254".into(),
+            range_start: "10.0.0.1".into(),
+            range_end: "10.0.0.254".into(),
+            ports: vec![22],
+            started_at: 30,
+            finished_at: 40,
+            total: 254,
+            alive: 3,
+        };
+        let id = save(&mut conn, &next, &[]).unwrap();
+        let saved = load(&conn, id).unwrap().summary;
+        assert_eq!(baseline_for(&conn, &saved).unwrap(), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn baselines_match_on_what_was_asked_for() {
+        let mut conn = open(Path::new(":memory:")).unwrap();
+        let spec = |targets: &str, start: &str, end: &str| ScanSummary {
+            id: 0,
+            targets: targets.into(),
+            range_start: start.into(),
+            range_end: end.into(),
+            ports: vec![22],
+            started_at: 0,
+            finished_at: 0,
+            total: 1,
+            alive: 0,
+        };
+        // Same written targets, different resulting span (a host at the end
+        // simply wasn't up the first time).
+        let first = save(
+            &mut conn,
+            &spec("10.0.0.0/24, 10.0.1.5", "10.0.0.1", "10.0.0.9"),
+            &[],
+        )
+        .unwrap();
+        let second = save(
+            &mut conn,
+            &spec("10.0.0.0/24, 10.0.1.5", "10.0.0.1", "10.0.1.5"),
+            &[],
+        )
+        .unwrap();
+        let loaded = load(&conn, second).unwrap().summary;
+        assert_eq!(baseline_for(&conn, &loaded).unwrap(), Some(first));
+
+        // A different instruction is not a baseline, even overlapping.
+        let other = save(&mut conn, &spec("10.0.0.0/25", "10.0.0.1", "10.0.0.9"), &[]).unwrap();
+        let loaded = load(&conn, other).unwrap().summary;
+        assert_eq!(baseline_for(&conn, &loaded).unwrap(), None);
     }
 
     #[test]
