@@ -271,6 +271,19 @@ fn delete_scan(db: State<'_, Db>, id: i64) -> Result<(), String> {
     history::delete(&*db.conn()?, id).map_err(db_err)
 }
 
+/// A native notification, sent from Rust so the page needs no permission of
+/// its own. Used for scans the user didn't start by hand.
+#[tauri::command]
+fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| format!("Notification refused: {e}"))
+}
+
 #[tauri::command]
 fn list_devices(db: State<'_, Db>) -> Result<Vec<Device>, String> {
     devices::list(&*db.conn()?).map_err(db_err)
@@ -329,6 +342,7 @@ fn main() {
     fdlimit::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(ScanState::default())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
@@ -344,6 +358,7 @@ fn main() {
             stop_scan,
             rescan_host,
             list_scans,
+            notify,
             list_devices,
             approvals_in_use,
             set_device_label,

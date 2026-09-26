@@ -89,6 +89,16 @@
   <footer class="statusbar">
     <span id="status">Ready. Reluctantly.</span>
     <span class="grow"></span>
+    <label class="auto" title="Rescan this range on a timer and notify when something changes">Auto
+      <select id="auto">
+        <option value="0">Off</option>
+        <option value="60000">1 min</option>
+        <option value="300000">5 min</option>
+        <option value="900000">15 min</option>
+        <option value="3600000">1 hour</option>
+        <option value="21600000">6 hours</option>
+      </select>
+    </label>
     <span id="counts"></span>
     <progress id="progress" value="0" max="1"></progress>
     <button id="togglePanel" type="button" class="small">Panel</button>
