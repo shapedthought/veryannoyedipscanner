@@ -57,7 +57,7 @@ npm run build    # release bundle in src-tauri/target/release/bundle/
 
 Rust tests: `cd src-tauri && cargo test`
 
-Frontend tests: `node --test "ui/*.test.js"`
+Frontend tests: `node --test ui/*.test.js`
 
 Scan history lives in the app data directory
 (`~/Library/Application Support/com.shapedthought.veryannoyedipscanner/history.sqlite` on macOS).
