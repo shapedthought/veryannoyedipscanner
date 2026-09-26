@@ -519,6 +519,7 @@ async function setApproved(host, approved) {
     await refreshDevices();
     renderAll();
     renderHost();
+    updateTray();
     setStatus(approved
       ? `${displayName(host) || host.ip} approved. One less thing to worry about.`
       : `${displayName(host) || host.ip} un-approved. Suspicious, are we?`);
@@ -756,6 +757,7 @@ listen("scan-done", async ({ payload }) => {
     setStatus(`${pick(GRUMBLES.done)}  ${tally} Since ${ago(diff.old.finished_at)}: ${diffSummary(diff)}.`);
     openPanel("changes");
   }
+  updateTray();
   // Only for scans you didn't start: you're already looking at the others.
   if (state.autoStarted && diff) await notifyAbout(diff);
   state.autoStarted = false;
@@ -806,6 +808,35 @@ async function exportCsv() {
     toast(`Couldn't save that.\n${err}`, true);
   }
 }
+
+// --------------------------------------------------------------------------
+// Menu bar
+// --------------------------------------------------------------------------
+
+/** Keep the menu bar current: the count sits by the icon, the sentence is the
+ *  first line of its menu. */
+async function updateTray() {
+  const alive = [...state.hosts.values()].filter((host) => host.alive);
+  const unknown = alive.filter(isUnknown).length;
+  const when = state.currentScan ? fmtDate(state.currentScan.finished_at) : "just now";
+  const parts = [`${plural(alive.length, "device")} up`];
+  if (unknown) parts.push(`${unknown} unapproved`);
+  try {
+    await invoke("update_tray", {
+      count: alive.length ? String(alive.length) : null,
+      summary: `${parts.join(" · ")} — ${when}`,
+    });
+  } catch (err) {
+    console.warn("tray update failed", err);
+  }
+}
+
+// "Scan now" from the menu, possibly with the window hidden.
+listen("tray-scan", () => {
+  if (state.scanning) return;
+  state.autoStarted = true; // you're not watching the table, so do notify
+  toggleScan();
+});
 
 // --------------------------------------------------------------------------
 // Scheduled rescans
