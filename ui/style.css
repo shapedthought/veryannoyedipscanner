@@ -262,6 +262,26 @@ button.icon { border: none; background: none; padding: 2px 6px; color: var(--mut
 .badge.new { background: var(--badge-new); }
 .badge.change { background: var(--badge-change); }
 .badge.gone { background: var(--badge-gone); }
+.badge.unknown { background: var(--accent); }
+
+/* -- device editing ------------------------------------------------------ */
+
+.field { display: block; margin-top: 8px; color: var(--muted); }
+.field input, .field textarea {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  font: inherit;
+  color: var(--text);
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 7px;
+}
+.field textarea { resize: vertical; min-height: 42px; }
+
+.device-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.saved { color: var(--badge-new); font-size: 12px; }
 
 /* -- side panel ---------------------------------------------------------- */
 

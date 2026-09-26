@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod arp;
+mod devices;
 mod discovery;
 mod dns;
 mod fdlimit;
@@ -10,6 +11,7 @@ mod probe;
 mod scanner;
 mod vendor;
 
+use devices::Device;
 use discovery::Announcements;
 use history::{Db, Diff, SavedScan, ScanSummary};
 use scanner::{Cancel, HostResult, Options, Range};
@@ -212,6 +214,7 @@ fn save_and_diff(
     let db = app.state::<Db>();
     let mut conn = db.conn()?;
     let id = history::save(&mut conn, &summary, hosts).map_err(db_err)?;
+    devices::record_sightings(&mut conn, hosts, summary.finished_at).map_err(db_err)?;
     summary.id = id;
     let Some(base_id) = history::baseline_for(&conn, &summary).map_err(db_err)? else {
         return Ok((id, None));
@@ -268,6 +271,38 @@ fn delete_scan(db: State<'_, Db>, id: i64) -> Result<(), String> {
     history::delete(&*db.conn()?, id).map_err(db_err)
 }
 
+#[tauri::command]
+fn list_devices(db: State<'_, Db>) -> Result<Vec<Device>, String> {
+    devices::list(&*db.conn()?).map_err(db_err)
+}
+
+/// True once the user has approved anything: until then, flagging every
+/// device as unknown would be noise.
+#[tauri::command]
+fn approvals_in_use(db: State<'_, Db>) -> Result<bool, String> {
+    devices::any_approved(&*db.conn()?).map_err(db_err)
+}
+
+#[tauri::command]
+fn set_device_label(
+    db: State<'_, Db>,
+    key: String,
+    label: String,
+    note: String,
+) -> Result<(), String> {
+    devices::set_label(&*db.conn()?, &key, label.trim(), note.trim(), now_ms()).map_err(db_err)
+}
+
+#[tauri::command]
+fn set_device_approved(db: State<'_, Db>, key: String, approved: bool) -> Result<(), String> {
+    devices::set_approved(&*db.conn()?, &key, approved, now_ms()).map_err(db_err)
+}
+
+#[tauri::command]
+fn forget_device(db: State<'_, Db>, key: String) -> Result<(), String> {
+    devices::forget(&*db.conn()?, &key).map_err(db_err)
+}
+
 /// Ask where to save, then write the CSV. Returns the path, or None if the
 /// user bailed out of the dialog.
 #[tauri::command]
@@ -309,6 +344,11 @@ fn main() {
             stop_scan,
             rescan_host,
             list_scans,
+            list_devices,
+            approvals_in_use,
+            set_device_label,
+            set_device_approved,
+            forget_device,
             load_scan,
             compare_scans,
             delete_scan,

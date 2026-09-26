@@ -23,6 +23,10 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   Ping column. Configurable ping retries catch Wi-Fi devices in power-save.
 - Pings over an **unprivileged ICMP socket** (no admin rights, no `ping`
   process per host), falling back to the `ping` command where that is blocked
+- **Your names, not theirs**: label any device with a name and note, stored
+  against its MAC so both survive a change of IP. Approve the devices that
+  belong on the network; anything unapproved stays flagged `UNKNOWN` in every
+  scan, not just the one where it first appeared.
 - Colour-coded rows: red = dead, green = alive, blue = open ports
 - Sortable columns, hide dead hosts, right-click to copy/rescan, CSV export
 - Complains constantly
