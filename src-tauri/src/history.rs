@@ -88,8 +88,39 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         "ALTER TABLE scans ADD COLUMN targets TEXT NOT NULL DEFAULT ''",
         [],
     );
+    // Host rows started out addressed only by scan and IP; a device key makes
+    // "show me this thing over time" a single query.
+    let _ = conn.execute(
+        "ALTER TABLE hosts ADD COLUMN key TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS hosts_by_key ON hosts (key)")?;
+    backfill_keys(&conn)?;
     crate::devices::create_table(&conn)?;
     Ok(conn)
+}
+
+/// Fill in device keys for rows written before the column existed. One pass,
+/// the first time a new build opens an old database.
+fn backfill_keys(conn: &Connection) -> rusqlite::Result<()> {
+    let rows: Vec<(i64, String, String)> = {
+        let mut stmt = conn.prepare("SELECT scan_id, ip, data FROM hosts WHERE key = ''")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>();
+        rows?
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut update = conn.prepare("UPDATE hosts SET key = ?1 WHERE scan_id = ?2 AND ip = ?3")?;
+    for (scan_id, ip, data) in rows {
+        let key = serde_json::from_str::<HostResult>(&data)
+            .map(|host| crate::devices::key_for(&host))
+            .unwrap_or_else(|_| format!("ip:{ip}"));
+        update.execute(params![key, scan_id, ip])?;
+    }
+    Ok(())
 }
 
 /// Persist a finished scan. Only live hosts are stored; dead ones are implied
@@ -116,9 +147,11 @@ pub fn save(
     )?;
     let id = tx.last_insert_rowid();
     {
-        let mut stmt = tx.prepare("INSERT INTO hosts (scan_id, ip, data) VALUES (?1, ?2, ?3)")?;
+        let mut stmt =
+            tx.prepare("INSERT INTO hosts (scan_id, ip, data, key) VALUES (?1, ?2, ?3, ?4)")?;
         for host in hosts.iter().filter(|h| h.alive) {
-            stmt.execute(params![id, host.ip, serde_json::to_string(host).unwrap()])?;
+            let data = serde_json::to_string(host).unwrap();
+            stmt.execute(params![id, host.ip, data, crate::devices::key_for(host)])?;
         }
     }
     tx.commit()?;
@@ -186,6 +219,66 @@ pub fn baseline_for(conn: &Connection, scan: &ScanSummary) -> rusqlite::Result<O
         |row| row.get(0),
     )
     .optional()
+}
+
+/// One scan's worth of evidence about a device.
+#[derive(Serialize, Clone, Debug)]
+pub struct Sighting {
+    pub scan_id: i64,
+    pub at: i64,
+    pub present: bool,
+    /// Where it was that time, when it was there.
+    pub ip: String,
+    pub ports: Vec<u16>,
+    pub alive_via: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DeviceHistory {
+    pub key: String,
+    /// Oldest first, covering only scans that looked where this device lives.
+    pub sightings: Vec<Sighting>,
+}
+
+/// Every scan that covered this device's address, and whether it answered.
+/// A scan of a different range isn't evidence of absence, so it's left out.
+pub fn device_history(conn: &Connection, key: &str, ip: &str) -> rusqlite::Result<DeviceHistory> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {}, h.data FROM scans s
+         LEFT JOIN hosts h ON h.scan_id = s.id AND h.key = ?1
+         ORDER BY s.id",
+        SUMMARY_COLS.replace("id,", "s.id,")
+    ))?;
+    let rows = stmt.query_map([key], |row| {
+        let summary = summary_from_row(row)?;
+        let data: Option<String> = row.get("data")?;
+        Ok((summary, data))
+    })?;
+
+    let mut sightings = Vec::new();
+    for row in rows {
+        let (summary, data) = row?;
+        let host = data.and_then(|d| serde_json::from_str::<HostResult>(&d).ok());
+        // Absence only counts where the scan actually looked.
+        let covered = host.is_some() || in_range(ip, &summary);
+        if !covered {
+            continue;
+        }
+        sightings.push(Sighting {
+            scan_id: summary.id,
+            at: summary.finished_at,
+            present: host.is_some(),
+            ip: host
+                .as_ref()
+                .map_or_else(|| ip.to_string(), |h| h.ip.clone()),
+            ports: host.as_ref().map(|h| h.ports.clone()).unwrap_or_default(),
+            alive_via: host.map(|h| h.alive_via).unwrap_or_default(),
+        });
+    }
+    Ok(DeviceHistory {
+        key: key.to_string(),
+        sightings,
+    })
 }
 
 // --------------------------------------------------------------------------
@@ -443,6 +536,73 @@ mod tests {
         let saved = load(&conn, id).unwrap().summary;
         assert_eq!(baseline_for(&conn, &saved).unwrap(), Some(1));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn timelines_count_only_scans_that_looked() {
+        let mut conn = open(Path::new(":memory:")).unwrap();
+        let mac = "AA:00:00:00:00:01";
+        let here = |ip: &str| HostResult {
+            ip: ip.into(),
+            alive: true,
+            mac: mac.into(),
+            ports: vec![22],
+            ..Default::default()
+        };
+
+        // Two scans of this range: present, then absent. Then a scan of a
+        // different range entirely, which says nothing either way.
+        let mut spec = scan(0, vec![here("10.0.0.5")]);
+        save(&mut conn, &spec.summary, &spec.hosts).unwrap();
+        spec.hosts.clear();
+        save(&mut conn, &spec.summary, &spec.hosts).unwrap();
+        let elsewhere = ScanSummary {
+            targets: "192.168.5.0/24".into(),
+            range_start: "192.168.5.1".into(),
+            range_end: "192.168.5.254".into(),
+            ..spec.summary.clone()
+        };
+        save(&mut conn, &elsewhere, &[]).unwrap();
+
+        let timeline = device_history(&conn, mac, "10.0.0.5").unwrap();
+        assert_eq!(
+            timeline
+                .sightings
+                .iter()
+                .map(|s| s.present)
+                .collect::<Vec<_>>(),
+            [true, false],
+            "the scan of another range is not evidence of absence"
+        );
+        assert_eq!(timeline.sightings[0].ports, [22]);
+        assert_eq!(timeline.sightings[0].ip, "10.0.0.5");
+    }
+
+    #[test]
+    fn timelines_follow_a_device_that_moved() {
+        let mut conn = open(Path::new(":memory:")).unwrap();
+        let mac = "AA:00:00:00:00:02";
+        let at = |ip: &str| HostResult {
+            ip: ip.into(),
+            alive: true,
+            mac: mac.into(),
+            ..Default::default()
+        };
+        let mut spec = scan(0, vec![at("10.0.0.5")]);
+        save(&mut conn, &spec.summary, &spec.hosts).unwrap();
+        spec.hosts = vec![at("10.0.0.99")];
+        save(&mut conn, &spec.summary, &spec.hosts).unwrap();
+
+        let timeline = device_history(&conn, mac, "10.0.0.99").unwrap();
+        assert_eq!(
+            timeline
+                .sightings
+                .iter()
+                .map(|s| s.ip.as_str())
+                .collect::<Vec<_>>(),
+            ["10.0.0.5", "10.0.0.99"],
+            "one device, two addresses"
+        );
     }
 
     #[test]

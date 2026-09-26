@@ -326,6 +326,21 @@ button.icon { border: none; background: none; padding: 2px 6px; color: var(--mut
 .device-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .saved { color: var(--badge-new); font-size: 12px; }
 
+/* -- presence over time -------------------------------------------------- */
+
+.strip { display: flex; gap: 2px; flex-wrap: wrap; margin: 6px 0 4px; }
+.tick {
+  width: 10px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--badge-gone);
+  opacity: 0.35;
+}
+.tick.present { background: var(--badge-new); opacity: 1; }
+.events { margin-top: 6px; }
+.events div { padding: 2px 0; }
+.events .when { color: var(--muted); }
+
 /* -- side panel ---------------------------------------------------------- */
 
 .panel {
