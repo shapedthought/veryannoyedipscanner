@@ -36,6 +36,7 @@ const el = {
   scan: $("scan"), ports: $("ports"), timeout: $("timeout"), threads: $("threads"),
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
   attempts: $("attempts"), trustArp: $("trustArp"), discover: $("discover"),
+  auto: $("auto"),
   rows: $("rows"), empty: $("empty"),
   status: $("status"), counts: $("counts"), progress: $("progress"),
   menu: $("menu"), toast: $("toast"),
@@ -66,6 +67,8 @@ const state = {
   history: [],
   devices: new Map(),   // device key -> { label, note, approved, ... }
   approvalsInUse: false,
+  autoTimer: null,      // handle for the scheduled rescan
+  autoStarted: false,   // this scan was started by the timer, not by you
   tab: "host",
   workingGrumble: pick(GRUMBLES.working),
 };
@@ -733,6 +736,7 @@ listen("scan-done", async ({ payload }) => {
   const tally = `${state.alive} alive of ${state.done} in ${secs}s.`;
 
   if (payload.cancelled) {
+    state.autoStarted = false;
     setStatus(`${pick(GRUMBLES.stop)}  ${tally} Not saved to history.`);
     return;
   }
@@ -752,6 +756,10 @@ listen("scan-done", async ({ payload }) => {
     setStatus(`${pick(GRUMBLES.done)}  ${tally} Since ${ago(diff.old.finished_at)}: ${diffSummary(diff)}.`);
     openPanel("changes");
   }
+  // Only for scans you didn't start: you're already looking at the others.
+  if (state.autoStarted && diff) await notifyAbout(diff);
+  state.autoStarted = false;
+
   const unknown = [...state.hosts.values()].filter(isUnknown).length;
   if (unknown) {
     setStatus(`${el.status.textContent} ${plural(unknown, "device")} you haven't approved.`);
@@ -796,6 +804,65 @@ async function exportCsv() {
     if (path) setStatus(`Exported to ${path}. Fine.`);
   } catch (err) {
     toast(`Couldn't save that.\n${err}`, true);
+  }
+}
+
+// --------------------------------------------------------------------------
+// Scheduled rescans
+// --------------------------------------------------------------------------
+
+function setSchedule(ms) {
+  clearInterval(state.autoTimer);
+  state.autoTimer = null;
+  if (!ms) {
+    setStatus("Auto-scan off. Back to doing this by hand, then.");
+    return;
+  }
+  state.autoTimer = setInterval(() => {
+    // Never interrupt a scan in progress, or one you started yourself.
+    if (state.scanning) return;
+    state.autoStarted = true;
+    toggleScan();
+  }, ms);
+  const every = el.auto.selectedOptions[0]?.textContent ?? `${ms} ms`;
+  setStatus(`Fine. I'll look again every ${every.toLowerCase()} and tell you if anything changes.`);
+}
+
+/** What's worth interrupting someone for, most alarming first. */
+function notification(diff) {
+  const unapproved = diff.added.filter((host) => isUnknown(host));
+  const name = (host) => displayName(host) || host.vendor || host.ip;
+
+  if (unapproved.length) {
+    return {
+      title: `${plural(unapproved.length, "device")} you haven't approved`,
+      body: unapproved.map(name).join(", "),
+    };
+  }
+  if (diff.added.length) {
+    return { title: `${plural(diff.added.length, "new device")}`, body: diff.added.map(name).join(", ") };
+  }
+  const opened = diff.changed.filter((c) => c.opened.length);
+  if (opened.length) {
+    return {
+      title: "Ports opened",
+      body: opened.map((c) => `${name(c.host)}: ${c.opened.join(", ")}`).join(" · "),
+    };
+  }
+  if (diff.gone.length) {
+    return { title: `${plural(diff.gone.length, "device")} gone`, body: diff.gone.map(name).join(", ") };
+  }
+  return null;
+}
+
+async function notifyAbout(diff) {
+  const message = notification(diff);
+  if (!message) return;
+  try {
+    await invoke("notify", { title: `😤 ${message.title}`, body: message.body });
+  } catch (err) {
+    // A refused notification shouldn't derail the scan that found something.
+    console.warn("notification failed", err);
   }
 }
 
@@ -888,6 +955,7 @@ for (const input of [el.start, el.end, el.ports, el.timeout, el.threads]) {
   input.addEventListener("keydown", (e) => e.key === "Enter" && !state.scanning && toggleScan());
 }
 el.hideDead.addEventListener("change", renderAll);
+el.auto.addEventListener("change", () => setSchedule(Number(el.auto.value)));
 el.exportBtn.addEventListener("click", exportCsv);
 
 // --------------------------------------------------------------------------

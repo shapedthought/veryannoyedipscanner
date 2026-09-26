@@ -27,6 +27,10 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   against its MAC so both survive a change of IP. Approve the devices that
   belong on the network; anything unapproved stays flagged `UNKNOWN` in every
   scan, not just the one where it first appeared.
+- **Scheduled rescans**: pick an interval in the status bar and it rescans the
+  range on a timer, sending a macOS notification when something changes —
+  devices you haven't approved first, then new arrivals, ports opening, and
+  departures. Scans you start yourself stay silent, since you're watching.
 - Colour-coded rows: red = dead, green = alive, blue = open ports
 - Sortable columns, hide dead hosts, right-click to copy/rescan, CSV export
 - Complains constantly

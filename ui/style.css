@@ -207,6 +207,16 @@ tbody tr td:first-child::before {
 }
 
 #counts { font-variant-numeric: tabular-nums; }
+
+.statusbar .auto { gap: 4px; }
+.statusbar select {
+  font: inherit;
+  color: var(--text);
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 4px;
+}
 progress { width: 180px; accent-color: var(--accent); }
 
 .menu {
