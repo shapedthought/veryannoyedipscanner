@@ -273,6 +273,29 @@ button.icon { border: none; background: none; padding: 2px 6px; color: var(--mut
 .badge.change { background: var(--badge-change); }
 .badge.gone { background: var(--badge-gone); }
 .badge.unknown { background: var(--accent); }
+.badge.risk-high { background: var(--accent); }
+.badge.risk-medium { background: var(--badge-change); }
+.badge.risk-low { background: var(--badge-gone); }
+
+/* -- findings ------------------------------------------------------------ */
+
+.finding { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.finding:last-child { border-bottom: none; }
+.chip {
+  flex: none;
+  align-self: flex-start;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 17px;
+  text-transform: uppercase;
+  color: #fff;
+}
+.chip.high { background: var(--accent); }
+.chip.medium { background: var(--badge-change); }
+.chip.low { background: var(--badge-gone); }
+.finding .why { color: var(--muted); margin-top: 1px; }
 
 /* -- device editing ------------------------------------------------------ */
 

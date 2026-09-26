@@ -4,6 +4,7 @@ use crate::arp;
 use crate::fdlimit;
 use crate::icmp;
 use crate::probe::{self, Service};
+use crate::risk::{self, Finding};
 use crate::vendor;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,9 @@ pub struct HostResult {
     pub ports: Vec<u16>,
     #[serde(default)]
     pub services: Vec<Service>,
+    /// What's worth knowing about what's exposed here.
+    #[serde(default)]
+    pub risks: Vec<Finding>,
 }
 
 #[derive(Serialize)]
@@ -174,6 +178,12 @@ pub fn cidr_range(cidr: &str) -> Result<Range, String> {
         end: Ipv4Addr::from(end).to_string(),
         cidr: format!("{}/{}", Ipv4Addr::from(net), prefix),
     })
+}
+
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// This machine's address on the LAN.
@@ -433,6 +443,7 @@ pub async fn scan_host(ip: Ipv4Addr, ports: &[u16], opts: &Options, cancel: &Can
     }
     host.vendor = vendor::lookup(&host.mac);
     host.services = services;
+    host.risks = risk::assess(&host, unix_seconds());
     host
 }
 
