@@ -89,6 +89,7 @@ const state = {
   autoStarted: false,   // this scan was started by the timer, not by you
   tab: "host",
   filterTerms: [],      // parsed once per keystroke, not once per row
+  timeline: null,       // device history for the selected host, if loaded
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -389,7 +390,11 @@ function openPanel(tab = state.tab) {
     btn.classList.toggle("active", btn.dataset.tab === tab);
   }
   for (const [name, body] of Object.entries(el.tabs)) body.hidden = name !== tab;
-  if (tab === "host") renderHost();
+  if (tab === "host") {
+    renderHost();
+    const host = state.hosts.get(state.selected);
+    if (host && !state.timeline) loadTimeline(host);
+  }
   if (tab === "changes") renderChanges();
   if (tab === "history") refreshHistory();
 }
@@ -423,6 +428,61 @@ const VIA = {
   mdns: "Alive (announced itself over mDNS/SSDP)",
 };
 const aliveVia = (host) => VIA[host.alive_via] ?? "Alive";
+
+/** Fetch the selected device's history, then redraw the panel with it. */
+async function loadTimeline(host) {
+  const key = deviceKey(host);
+  state.timeline = null;
+  try {
+    const history = await invoke("device_history", { key, ip: host.ip });
+    // The selection may have moved on while we were waiting.
+    if (state.selected === host.ip) {
+      state.timeline = history;
+      renderHost();
+    }
+  } catch (err) {
+    console.warn("timeline failed", err);
+  }
+}
+
+/** Presence across past scans, plus the moments worth naming. */
+function timelineSection(host) {
+  const sightings = state.timeline?.sightings ?? [];
+  if (sightings.length < 2) return null; // one scan is not a history
+
+  const recent = sightings.slice(-40);
+  const seen = sightings.filter((s) => s.present).length;
+  const events = [];
+  let previous = null;
+  for (const sighting of sightings) {
+    if (!sighting.present) continue;
+    if (!previous) {
+      events.push([sighting.at, "First seen here"]);
+    } else {
+      if (previous.ip !== sighting.ip) {
+        events.push([sighting.at, `Moved from ${previous.ip} to ${sighting.ip}`]);
+      }
+      const opened = sighting.ports.filter((p) => !previous.ports.includes(p));
+      const closed = previous.ports.filter((p) => !sighting.ports.includes(p));
+      if (opened.length) events.push([sighting.at, `Opened ${opened.join(", ")}`]);
+      if (closed.length) events.push([sighting.at, `Closed ${closed.join(", ")}`]);
+    }
+    previous = sighting;
+  }
+
+  return [
+    h("h3", {}, "Over time"),
+    h("div", {}, `Answered ${seen} of ${plural(sightings.length, "scan")} that looked here.`),
+    h("div", { class: "strip" },
+      ...recent.map((s) => h("div", {
+        class: s.present ? "tick present" : "tick",
+        title: `${fmtDate(s.at)} — ${s.present ? `${s.ip}${s.ports.length ? ` · ports ${s.ports.join(",")}` : ""}` : "no answer"}`,
+      }))),
+    events.length > 0 && h("div", { class: "events" },
+      ...events.slice(-6).reverse().map(([at, text]) =>
+        h("div", {}, h("span", { class: "when" }, `${fmtDate(at)} — `), text))),
+  ];
+}
 
 function renderHost() {
   const body = el.tabs.host;
@@ -465,6 +525,7 @@ function renderHost() {
         )),
     ],
     deviceSection(host),
+    timelineSection(host),
     h("h3", {}, `Open ports (${host.ports.length})`),
     host.ports.length
       ? [
@@ -985,10 +1046,15 @@ async function notifyAbout(diff) {
 // --------------------------------------------------------------------------
 
 function select(ip) {
+  if (state.selected !== ip) state.timeline = null;
   state.selected = ip;
   for (const tr of el.rows.querySelectorAll("tr.selected")) tr.classList.remove("selected");
   el.rows.querySelector(`tr[data-ip="${ip}"]`)?.classList.add("selected");
-  if (!el.panel.hidden && state.tab === "host") renderHost();
+  if (!el.panel.hidden && state.tab === "host") {
+    renderHost();
+    const host = state.hosts.get(ip);
+    if (host) loadTimeline(host);
+  }
 }
 
 el.rows.addEventListener("click", (e) => {

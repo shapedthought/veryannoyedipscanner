@@ -15,7 +15,7 @@ mod vendor;
 
 use devices::Device;
 use discovery::Announcements;
-use history::{Db, Diff, SavedScan, ScanSummary};
+use history::{Db, DeviceHistory, Diff, SavedScan, ScanSummary};
 use scanner::{Cancel, HostResult, Options, Range};
 use serde::Serialize;
 use std::net::Ipv4Addr;
@@ -310,6 +310,12 @@ fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
         .map_err(|e| format!("Notification refused: {e}"))
 }
 
+/// Every scan that looked where this device lives, and whether it answered.
+#[tauri::command]
+fn device_history(db: State<'_, Db>, key: String, ip: String) -> Result<DeviceHistory, String> {
+    history::device_history(&*db.conn()?, &key, &ip).map_err(db_err)
+}
+
 #[tauri::command]
 fn list_devices(db: State<'_, Db>) -> Result<Vec<Device>, String> {
     devices::list(&*db.conn()?).map_err(db_err)
@@ -394,6 +400,7 @@ fn main() {
             list_scans,
             notify,
             update_tray,
+            device_history,
             list_devices,
             approvals_in_use,
             set_device_label,
