@@ -50,7 +50,12 @@
       <input id="filter" class="filter" type="search" spellcheck="false"
              placeholder="Filter: synology, port:22, vendor:apple, new, risk, -dead"
              title="Terms are combined; prefix one with - to exclude it" />
-      <button id="export" type="button">Export CSV…</button>
+      <select id="export" title="Save what you're looking at">
+        <option value="">Export…</option>
+        <option value="csv">Table as CSV</option>
+        <option value="json">Scan as JSON</option>
+        <option value="changes">Changes as JSON</option>
+      </select>
     </div>
   </header>
 
@@ -78,12 +83,14 @@
         <button type="button" data-tab="host">Host</button>
         <button type="button" data-tab="changes">Changes <span id="changeCount" class="count" hidden></span></button>
         <button type="button" data-tab="history">History</button>
+        <button type="button" data-tab="settings">Settings</button>
         <span class="grow"></span>
         <button type="button" id="closePanel" class="icon" title="Close panel">✕</button>
       </nav>
       <section id="tab-host" class="tab-body"></section>
       <section id="tab-changes" class="tab-body"></section>
       <section id="tab-history" class="tab-body"></section>
+      <section id="tab-settings" class="tab-body"></section>
     </aside>
   </div>
 

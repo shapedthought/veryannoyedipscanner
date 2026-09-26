@@ -96,6 +96,12 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     );
     conn.execute_batch("CREATE INDEX IF NOT EXISTS hosts_by_key ON hosts (key)")?;
     backfill_keys(&conn)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS settings (
+             key   TEXT PRIMARY KEY,
+             value TEXT NOT NULL
+         );",
+    )?;
     crate::devices::create_table(&conn)?;
     Ok(conn)
 }
@@ -279,6 +285,23 @@ pub fn device_history(conn: &Connection, key: &str, ip: &str) -> rusqlite::Resul
         key: key.to_string(),
         sightings,
     })
+}
+
+/// Small key/value store for things the app should remember: a webhook URL,
+/// a scan schedule, whatever comes next.
+pub fn settings(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 // --------------------------------------------------------------------------
