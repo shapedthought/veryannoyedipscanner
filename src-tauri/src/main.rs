@@ -388,11 +388,12 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running Very Annoyed IP Scanner")
-        .run(|app, event| {
+        .run(|_app, _event| {
             // Clicking the dock icon after closing the window should bring it
-            // back, rather than doing nothing.
-            if let tauri::RunEvent::Reopen { .. } = event {
-                tray::show(app);
+            // back, rather than doing nothing. Reopen is a macOS-only event.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                tray::show(_app);
             }
         });
 }
