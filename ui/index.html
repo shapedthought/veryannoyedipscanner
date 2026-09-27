@@ -85,6 +85,7 @@
       <nav class="tabs">
         <button type="button" data-tab="host">Host</button>
         <button type="button" data-tab="changes">Changes <span id="changeCount" class="count" hidden></span></button>
+        <button type="button" data-tab="watch">Watch <span id="watchCount" class="count" hidden></span></button>
         <button type="button" data-tab="history">History</button>
         <button type="button" data-tab="settings">Settings</button>
         <span class="grow"></span>
@@ -92,6 +93,7 @@
       </nav>
       <section id="tab-host" class="tab-body"></section>
       <section id="tab-changes" class="tab-body"></section>
+      <section id="tab-watch" class="tab-body"></section>
       <section id="tab-history" class="tab-body"></section>
       <section id="tab-settings" class="tab-body"></section>
     </aside>
@@ -125,6 +127,7 @@
     <li data-act="rescan">Rescan this host</li>
     <li class="divider"></li>
     <li data-act="approve">Approve this device</li>
+    <li data-act="watch">Watch this host</li>
   </ul>
 
   <div id="toast" class="toast" hidden></div>

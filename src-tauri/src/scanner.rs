@@ -453,6 +453,22 @@ pub async fn fill_identity(host: &mut HostResult) {
     }
 }
 
+/// Is this up right now? A port means that service specifically; without
+/// one, any sign of the host will do.
+pub async fn check_alive(ip: Ipv4Addr, port: Option<u16>, opts: &Options) -> bool {
+    let cancel = Cancel {
+        current: Arc::new(AtomicU64::new(0)),
+        generation: 0,
+    };
+    match port {
+        Some(port) => tcp_open(ip, port, opts.timeout_ms).await,
+        None => {
+            ping(ip, opts, &cancel).await.is_some()
+                || (opts.trust_arp && arp::lookup(ip).await.is_some())
+        }
+    }
+}
+
 pub async fn scan_host(ip: Ipv4Addr, ports: &[u16], opts: &Options, cancel: &Cancel) -> HostResult {
     // Hosts that drop ICMP may still have open ports, so probe both at once.
     let (ping_ms, ports) = tokio::join!(

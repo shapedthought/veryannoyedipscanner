@@ -116,6 +116,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     )?;
     crate::devices::create_table(&conn)?;
     crate::profiles::create_table(&conn)?;
+    crate::watches::create_table(&conn)?;
     Ok(conn)
 }
 

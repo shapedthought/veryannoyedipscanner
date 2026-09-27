@@ -65,8 +65,9 @@ const el = {
   changeCount: $("changeCount"),
   tabs: {
     host: $("tab-host"), changes: $("tab-changes"),
-    history: $("tab-history"), settings: $("tab-settings"),
+    history: $("tab-history"), settings: $("tab-settings"), watch: $("tab-watch"),
   },
+  watchCount: $("watchCount"),
 };
 const COLUMNS = ["ip", "ping", "hostname", "vendor", "mac", "ports", "details"];
 const HEADINGS = {
@@ -101,6 +102,8 @@ const state = {
   profile: null,        // the network we're scanning under
   network: null,        // what we detected about where we are
   declined: null,       // a fingerprint we've already been told not to ask about
+  watches: [],          // things being kept an eye on, with recent checks
+  watchTimer: null,
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -409,6 +412,7 @@ function openPanel(tab = state.tab) {
   if (tab === "changes") renderChanges();
   if (tab === "history") refreshHistory();
   if (tab === "settings") renderSettings();
+  if (tab === "watch") renderWatches();
 }
 
 function closePanel() {
@@ -423,6 +427,13 @@ function serviceCards(host) {
       h("div", { class: "top" },
         h("span", { class: "port" }, port),
         h("span", { class: "muted" }, s?.name || "unknown"),
+        h("span", { class: "grow" }),
+        h("button", {
+          type: "button",
+          class: "small",
+          title: "Check this service every minute and say when it goes",
+          onclick: () => toggleWatch(host, port),
+        }, watchFor(host, port) ? "Unwatch" : "Watch"),
       ),
       s?.summary
         ? h("div", { class: "summary" }, s.summary)
@@ -568,6 +579,8 @@ function deviceSection(host) {
     h("label", { class: "field" }, "Note", note),
     h("div", { class: "device-actions" },
       h("button", { type: "button", class: "small", onclick: save }, "Save"),
+      h("button", { type: "button", class: "small", onclick: () => toggleWatch(host) },
+        watchFor(host) ? "Stop watching" : "Watch"),
       h("button", {
         type: "button",
         class: device.approved ? "small" : "small primary",
@@ -1075,6 +1088,122 @@ async function exportAs(kind) {
 }
 
 // --------------------------------------------------------------------------
+// Watching
+// --------------------------------------------------------------------------
+
+/** How often watched hosts are checked: often enough to be useful, rarely
+ *  enough to be rude. */
+const WATCH_EVERY_MS = 60_000;
+
+const watchFor = (host, port = null) =>
+  state.watches.find((w) => w.watch.key === deviceKey(host) && w.watch.port === port);
+
+async function refreshWatches() {
+  try {
+    state.watches = await invoke("list_watches", { profileId: state.profile?.id ?? null });
+  } catch (err) {
+    console.warn("watches failed", err);
+    state.watches = [];
+  }
+  el.watchCount.textContent = state.watches.length;
+  el.watchCount.hidden = state.watches.length === 0;
+  scheduleWatchChecks();
+}
+
+async function toggleWatch(host, port = null) {
+  const existing = watchFor(host, port);
+  try {
+    if (existing) {
+      await invoke("remove_watch", { id: existing.watch.id });
+    } else {
+      await invoke("add_watch", {
+        profileId: state.profile?.id ?? null,
+        key: deviceKey(host),
+        ip: host.ip,
+        port,
+        label: displayName(host) || host.vendor || host.ip,
+      });
+    }
+    await refreshWatches();
+    if (!el.panel.hidden && state.tab === "watch") renderWatches();
+    renderHost();
+    const what = port ? `${host.ip}:${port}` : displayName(host) || host.ip;
+    setStatus(existing ? `No longer watching ${what}.` : `Watching ${what}. I'll tell you if it goes.`);
+    if (!existing) checkWatches();
+  } catch (err) {
+    toast(String(err), true);
+  }
+}
+
+async function checkWatches() {
+  if (!state.watches.length) return;
+  try {
+    const transitions = await invoke("check_watches", {
+      profileId: state.profile?.id ?? null,
+      options: scanOptions(),
+    });
+    await refreshWatches();
+    if (!el.panel.hidden && state.tab === "watch") renderWatches();
+    for (const change of transitions) {
+      const name = change.watch.label || change.watch.ip;
+      const where = change.watch.port ? `${name}:${change.watch.port}` : name;
+      const title = change.up ? `${where} is back` : `${where} has gone`;
+      setStatus(title);
+      invoke("notify", { title: `😤 ${title}`, body: `Changed at ${fmtDate(change.watch.changed_at)}` })
+        .catch((err) => console.warn("notify failed", err));
+    }
+  } catch (err) {
+    console.warn("watch check failed", err);
+  }
+}
+
+function scheduleWatchChecks() {
+  clearInterval(state.watchTimer);
+  state.watchTimer = state.watches.length ? setInterval(checkWatches, WATCH_EVERY_MS) : null;
+}
+
+function renderWatches() {
+  const body = el.tabs.watch;
+  if (!state.watches.length) {
+    fill(body, h("p", { class: "hint" },
+      "Nothing watched. Right-click a host, or use the Host panel, to keep an eye on it. " +
+      "Watched things are checked every minute, and I'll say when one goes."));
+    return;
+  }
+  fill(body,
+    h("p", { class: "muted" }, `Checked every minute. ${plural(state.watches.length, "watch")} on this network.`),
+    ...state.watches.map(({ watch, checks }) => {
+      const recent = checks.slice(-60);
+      const since = watch.changed_at ? ` since ${fmtDate(watch.changed_at)}` : "";
+      return h("div", { class: "card" },
+        h("div", { class: "top" },
+          h("span", { class: "port" }, watch.port ? `${watch.ip}:${watch.port}` : watch.ip),
+          h("span", { class: `watch-state ${watch.state}` }, watch.state || "not checked yet"),
+        ),
+        watch.label && h("div", { class: "sub" }, watch.label),
+        watch.state && h("div", { class: "sub" }, `${watch.state === "up" ? "Up" : "Down"}${since}`),
+        recent.length > 0 && h("div", { class: "strip" },
+          ...recent.map(([at, up]) => h("div", {
+            class: up ? "tick present thin" : "tick down thin",
+            title: `${fmtDate(at)} — ${up ? "up" : "no answer"}`,
+          }))),
+        h("div", { class: "actions" },
+          h("button", { type: "button", class: "small", onclick: () => {
+            if (state.hosts.has(watch.ip)) focusHost(watch.ip);
+            else toast("Not in the current scan.");
+          } }, "Show"),
+          h("button", { type: "button", class: "small", onclick: async () => {
+            await invoke("remove_watch", { id: watch.id });
+            await refreshWatches();
+            renderWatches();
+            renderHost();
+          } }, "Stop watching"),
+        ),
+      );
+    }));
+}
+
+// --------------------------------------------------------------------------
 // Networks
 // --------------------------------------------------------------------------
 
@@ -1092,7 +1221,7 @@ async function setProfile(id) {
     el.targets.value = state.profile.targets;
     previewTargets();
   }
-  await Promise.all([refreshHistory(), refreshDevices()]);
+  await Promise.all([refreshHistory(), refreshDevices(), refreshWatches()]);
   renderProfiles();
   renderAll();
   return state.profile;
@@ -1341,6 +1470,8 @@ el.rows.addEventListener("contextmenu", (e) => {
   const host = state.hosts.get(tr.dataset.ip);
   el.menu.querySelector('[data-act="approve"]').textContent =
     deviceFor(host)?.approved ? "Un-approve this device" : "Approve this device";
+  el.menu.querySelector('[data-act="watch"]').textContent =
+    watchFor(host) ? "Stop watching this host" : "Watch this host";
   el.menu.hidden = false;
   const { innerWidth: w, innerHeight: ht } = window;
   const { offsetWidth: mw, offsetHeight: mh } = el.menu;
@@ -1359,6 +1490,7 @@ el.menu.addEventListener("click", (e) => {
   if (!act || !host) return;
   if (act === "rescan") rescan(host.ip);
   else if (act === "approve") setApproved(host, !deviceFor(host)?.approved);
+  else if (act === "watch") toggleWatch(host);
   else if (act === "details") focusHost(host.ip);
   else copy(cell(host, act));
 });
@@ -1482,6 +1614,7 @@ invoke("local_range").then((r) => {
   checkNetwork();
 });
 refreshHistory();
+refreshWatches();
 loadSettings();
 refreshDevices().then(renderAll);
 updateChrome();
