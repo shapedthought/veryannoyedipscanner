@@ -26,6 +26,12 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   Ping column. Configurable ping retries catch Wi-Fi devices in power-save.
 - Pings over an **unprivileged ICMP socket** (no admin rights, no `ping`
   process per host), falling back to the `ping` command where that is blocked
+- **Network profiles**: the app recognises which network you're on by its
+  gateway's MAC address (and SSID where macOS will say), not by its address
+  range — because half the world is 192.168.0.x. Scans, history and approvals
+  belong to a profile, so one network is never compared against another. A
+  network it doesn't recognise gets a prompt rather than a silent mess, and
+  each profile remembers what to scan there.
 - **A history per device**: how many of the scans that looked here it answered,
   a strip showing when it was present, and the moments worth naming — first
   seen, address changes, ports opening and closing.

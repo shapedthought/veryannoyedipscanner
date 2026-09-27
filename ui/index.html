@@ -9,6 +9,9 @@
   <header class="toolbar">
     <div class="row">
       <span class="brand" title="Very Annoyed IP Scanner">😤</span>
+      <label title="Scans, history and approvals are kept per network">Network
+        <select id="profile"></select>
+      </label>
       <label class="targets">Targets
         <input id="targets" class="target-input" spellcheck="false"
                placeholder="192.168.0.0/24, 10.0.0.1-50, 10.0.1.7"
@@ -125,6 +128,28 @@
   </ul>
 
   <div id="toast" class="toast" hidden></div>
+
+  <div id="ask" class="backdrop" hidden>
+    <div class="dialog">
+      <h2 id="askTitle">A network I don't recognise</h2>
+      <p id="askBody" class="muted"></p>
+      <label class="field">Call it
+        <input id="askName" type="text" />
+      </label>
+      <label class="field">Scan
+        <input id="askTargets" type="text" spellcheck="false" />
+      </label>
+      <p id="askExisting" class="muted" hidden>
+        Or treat it as one you already know:
+        <select id="askProfile"></select>
+      </p>
+      <div class="device-actions">
+        <button id="askCreate" type="button" class="small primary">Remember this network</button>
+        <button id="askSkip" type="button" class="small">Not now</button>
+      </div>
+      <p class="muted">Until then, scans here aren't compared with anywhere else.</p>
+    </div>
+  </div>
 
   <script src="filter.js"></script>
   <script src="main.js"></script>

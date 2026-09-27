@@ -54,7 +54,10 @@ const el = {
   scan: $("scan"), ports: $("ports"), timeout: $("timeout"), threads: $("threads"),
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
   attempts: $("attempts"), trustArp: $("trustArp"), discover: $("discover"),
-  auto: $("auto"), filter: $("filter"),
+  auto: $("auto"), filter: $("filter"), profile: $("profile"),
+  ask: $("ask"), askTitle: $("askTitle"), askBody: $("askBody"), askName: $("askName"),
+  askTargets: $("askTargets"), askExisting: $("askExisting"), askProfile: $("askProfile"),
+  askCreate: $("askCreate"), askSkip: $("askSkip"),
   rows: $("rows"), empty: $("empty"),
   status: $("status"), counts: $("counts"), progress: $("progress"),
   menu: $("menu"), toast: $("toast"),
@@ -94,6 +97,9 @@ const state = {
   filterTerms: [],      // parsed once per keystroke, not once per row
   timeline: null,       // device history for the selected host, if loaded
   settings: {},         // webhook url and friends, as stored by the backend
+  profiles: [],
+  profile: null,        // the network we're scanning under
+  network: null,        // what we detected about where we are
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -629,7 +635,7 @@ async function refreshDevices() {
   try {
     const [devices, inUse] = await Promise.all([
       invoke("list_devices"),
-      invoke("approvals_in_use"),
+      invoke("approvals_in_use", { profileId: state.profile?.id ?? null }),
     ]);
     state.devices = new Map(devices.map((d) => [d.key, d]));
     state.approvalsInUse = inUse;
@@ -723,7 +729,7 @@ function renderSettings() {
 
 async function refreshHistory() {
   try {
-    state.history = await invoke("list_scans");
+    state.history = await invoke("list_scans", { profileId: state.profile?.id ?? null });
   } catch (err) {
     toast(String(err), true);
   }
@@ -874,6 +880,9 @@ function setScanning(on) {
 }
 
 async function toggleScan() {
+  // Moving between networks mid-session is exactly when this matters.
+  if (!state.scanning) await checkNetwork();
+  if (!el.ask.hidden) return; // waiting on an answer about where we are
   if (state.scanning) {
     el.scan.disabled = true;
     setStatus("Stopping… hold your horses.");
@@ -887,6 +896,11 @@ async function toggleScan() {
       threads: Number(el.threads.value) || 64,
       options: scanOptions(),
     });
+    if (state.profile && el.targets.value.trim() !== state.profile.targets) {
+      invoke("remember_targets", { id: state.profile.id, targets: el.targets.value.trim() })
+        .catch((err) => console.warn("couldn't remember targets", err));
+      state.profile.targets = el.targets.value.trim();
+    }
     Object.assign(state, {
       generation: started.generation,
       total: started.total,
@@ -1042,6 +1056,101 @@ async function exportAs(kind) {
     if (path) setStatus(`Exported to ${path}. Fine.`);
   } catch (err) {
     toast(`Couldn't save that.\n${err}`, true);
+  }
+}
+
+// --------------------------------------------------------------------------
+// Networks
+// --------------------------------------------------------------------------
+
+function renderProfiles() {
+  fill(el.profile,
+    ...state.profiles.map((p) => h("option", { value: p.id }, p.name)),
+    h("option", { value: "" }, state.profiles.length ? "Not set" : "No networks yet"));
+  el.profile.value = state.profile ? String(state.profile.id) : "";
+}
+
+async function setProfile(id) {
+  state.profile = await invoke("use_profile", { id });
+  if (state.profile?.targets) {
+    el.targets.value = state.profile.targets;
+    previewTargets();
+  }
+  await Promise.all([refreshHistory(), refreshDevices()]);
+  renderProfiles();
+  renderAll();
+  return state.profile;
+}
+
+/** Work out where we are, and ask about it if it's somewhere new. */
+async function checkNetwork({ askIfUnknown = true } = {}) {
+  try {
+    state.network = await invoke("current_network");
+    state.profiles = await invoke("list_profiles");
+  } catch (err) {
+    console.warn("network detection failed", err);
+    return;
+  }
+  const known = state.network.profile;
+  if (known) {
+    if (state.profile?.id !== known.id) {
+      await setProfile(known.id);
+      setStatus(`${known.name}. I know this one.`);
+    } else {
+      renderProfiles();
+    }
+    return;
+  }
+  // Somewhere new: don't let the previous network's history apply to it.
+  if (state.profile) await setProfile(null);
+  renderProfiles();
+  if (askIfUnknown) askAboutNetwork();
+}
+
+function askAboutNetwork() {
+  const { fingerprint, suggested_name: suggested } = state.network ?? {};
+  if (!fingerprint) return;
+  const where = [
+    fingerprint.ssid && `“${fingerprint.ssid}”`,
+    fingerprint.gateway_ip && `gateway ${fingerprint.gateway_ip}`,
+    fingerprint.gateway_mac && `(${fingerprint.gateway_mac})`,
+  ].filter(Boolean).join(" ");
+
+  el.askBody.textContent =
+    `This is somewhere I haven't scanned before: ${where}. ` +
+    "Kept as its own network, its scans won't be compared with anywhere else — " +
+    "which matters, since half the world uses the same addresses.";
+  el.askName.value = suggested ?? "";
+  el.askTargets.value = fingerprint.subnet ?? el.targets.value;
+
+  const others = state.profiles;
+  el.askExisting.hidden = others.length === 0;
+  fill(el.askProfile,
+    h("option", { value: "" }, "Choose…"),
+    ...others.map((p) => h("option", { value: p.id }, p.name)));
+
+  el.ask.hidden = false;
+  el.askName.focus();
+  el.askName.select();
+}
+
+async function rememberNetwork() {
+  const fingerprint = state.network?.fingerprint;
+  if (!fingerprint) return;
+  const targets = el.askTargets.value.trim() || fingerprint.subnet;
+  try {
+    const profile = await invoke("create_profile", {
+      name: el.askName.value.trim() || state.network.suggested_name,
+      fingerprint: fingerprint.id,
+      targets,
+      subnet: fingerprint.subnet,
+    });
+    state.profiles = await invoke("list_profiles");
+    el.ask.hidden = true;
+    await setProfile(profile.id);
+    setStatus(`${profile.name} it is. I'll keep its scans to itself.`);
+  } catch (err) {
+    toast(String(err), true);
   }
 }
 
@@ -1286,6 +1395,34 @@ for (const input of [el.targets, el.ports, el.timeout, el.threads]) {
   input.addEventListener("keydown", (e) => e.key === "Enter" && !state.scanning && toggleScan());
 }
 el.hideDead.addEventListener("change", renderAll);
+el.profile.addEventListener("change", async () => {
+  const id = el.profile.value ? Number(el.profile.value) : null;
+  const profile = await setProfile(id);
+  setStatus(profile ? `Scanning as ${profile.name}.` : "No network profile. Nothing is compared.");
+});
+el.askCreate.addEventListener("click", rememberNetwork);
+el.askSkip.addEventListener("click", () => {
+  el.ask.hidden = true;
+  setStatus("Fine, stay anonymous. This scan won't be compared with anything.");
+});
+el.askProfile.addEventListener("change", async () => {
+  if (!el.askProfile.value) return;
+  el.ask.hidden = true;
+  const profile = await setProfile(Number(el.askProfile.value));
+  // Same profile, new fingerprint: remember this one too (new router, say).
+  if (profile && state.network?.fingerprint) {
+    await invoke("create_profile", {
+      name: profile.name,
+      fingerprint: state.network.fingerprint.id,
+      targets: profile.targets || el.targets.value.trim(),
+      subnet: state.network.fingerprint.subnet,
+    }).catch((err) => toast(String(err), true));
+    state.profiles = await invoke("list_profiles");
+    renderProfiles();
+  }
+  setStatus(`Treating this as ${profile?.name}.`);
+});
+
 el.filter.addEventListener("input", () => {
   state.filterTerms = parseFilter(el.filter.value);
   renderAll();
@@ -1316,6 +1453,8 @@ for (const name of Object.keys(PORT_PRESETS)) {
 invoke("local_range").then((r) => {
   el.targets.value = r.cidr;
   previewTargets();
+  // Then let the network we're actually on have the final say.
+  checkNetwork();
 });
 refreshHistory();
 loadSettings();
