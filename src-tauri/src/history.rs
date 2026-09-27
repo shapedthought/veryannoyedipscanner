@@ -25,6 +25,10 @@ pub struct ScanSummary {
     /// profiles existed, and never matched against a profiled scan.
     #[serde(default)]
     pub profile_id: Option<i64>,
+    /// Found nothing where the last comparable scan found something. Almost
+    /// always a mistake — wrong range, cable out — so it isn't a baseline.
+    #[serde(default)]
+    pub suspect: bool,
     pub started_at: i64,
     pub finished_at: i64,
     /// The targets as typed, e.g. "192.168.0.0/24, 10.0.1.5". Empty for scans
@@ -87,9 +91,13 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
              PRIMARY KEY (scan_id, ip)
          );",
     )?;
-    // Added after the first release; older databases don't have it.
+    // Added after the first release; older databases don't have them.
     let _ = conn.execute(
         "ALTER TABLE scans ADD COLUMN targets TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE scans ADD COLUMN suspect INTEGER NOT NULL DEFAULT 0",
         [],
     );
     // Host rows started out addressed only by scan and IP; a device key makes
@@ -143,8 +151,8 @@ pub fn save(
 ) -> rusqlite::Result<i64> {
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO scans (started_at, finished_at, range_start, range_end, ports, total, alive, targets, profile_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO scans (started_at, finished_at, range_start, range_end, ports, total, alive, targets, profile_id, suspect)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             summary.started_at,
             summary.finished_at,
@@ -155,6 +163,7 @@ pub fn save(
             summary.alive,
             summary.targets,
             summary.profile_id,
+            summary.suspect,
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -183,11 +192,12 @@ fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<ScanSummary> {
         alive: row.get(7)?,
         targets: row.get(8)?,
         profile_id: row.get(9)?,
+        suspect: row.get::<_, i64>(10)? != 0,
     })
 }
 
 const SUMMARY_COLS: &str =
-    "id, started_at, finished_at, range_start, range_end, ports, total, alive, targets, profile_id";
+    "id, started_at, finished_at, range_start, range_end, ports, total, alive, targets, profile_id, suspect";
 
 /// History for one network, or everything when no profile is active.
 pub fn list(conn: &Connection, profile_id: Option<i64>) -> rusqlite::Result<Vec<ScanSummary>> {
@@ -222,6 +232,22 @@ pub fn delete(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 
 /// The most recent earlier scan of exactly the same range, used as the
 /// automatic baseline for "what changed since last time".
+/// The scan a new one would be compared against, before it has an id of its
+/// own. Used to judge whether finding nothing is suspicious.
+pub fn latest_comparable(
+    conn: &Connection,
+    scan: &ScanSummary,
+) -> rusqlite::Result<Option<ScanSummary>> {
+    let probe = ScanSummary {
+        id: i64::MAX,
+        ..scan.clone()
+    };
+    match baseline_for(conn, &probe)? {
+        Some(id) => load(conn, id).map(|saved| Some(saved.summary)),
+        None => Ok(None),
+    }
+}
+
 pub fn baseline_for(conn: &Connection, scan: &ScanSummary) -> rusqlite::Result<Option<i64>> {
     // Same network first: a scan at someone else's house is not a baseline
     // for yours, however similar the addresses look. Then match on the
@@ -229,6 +255,7 @@ pub fn baseline_for(conn: &Connection, scan: &ScanSummary) -> rusqlite::Result<O
     conn.query_row(
         "SELECT id FROM scans
          WHERE id < ?1
+           AND suspect = 0
            AND profile_id IS ?5
            AND CASE WHEN ?2 != '' AND targets != '' THEN targets = ?2
                     ELSE range_start = ?3 AND range_end = ?4 END
@@ -271,7 +298,12 @@ pub fn device_history(conn: &Connection, key: &str, ip: &str) -> rusqlite::Resul
         "SELECT {}, h.data FROM scans s
          LEFT JOIN hosts h ON h.scan_id = s.id AND h.key = ?1
          ORDER BY s.id",
-        SUMMARY_COLS.replace("id,", "s.id,")
+        // Qualified, since hosts has columns of the same name.
+        SUMMARY_COLS
+            .split(", ")
+            .map(|column| format!("s.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     ))?;
     let rows = stmt.query_map([key], |row| {
         let summary = summary_from_row(row)?;
@@ -471,6 +503,7 @@ mod tests {
             summary: ScanSummary {
                 id,
                 profile_id: None,
+                suspect: false,
                 started_at: 0,
                 finished_at: 0,
                 targets: "10.0.0.1-254".into(),
@@ -566,6 +599,7 @@ mod tests {
         let next = ScanSummary {
             id: 0,
             profile_id: None,
+            suspect: false,
             targets: "10.0.0.1-254".into(),
             range_start: "10.0.0.1".into(),
             range_end: "10.0.0.254".into(),
@@ -648,12 +682,72 @@ mod tests {
         );
     }
 
+    /// The incident that prompted this: a scan run on the wrong network found
+    /// nothing, and would otherwise have become the baseline for home.
+    #[test]
+    fn a_scan_that_found_nothing_is_not_a_baseline() {
+        let mut conn = open(Path::new(":memory:")).unwrap();
+        let host = HostResult {
+            ip: "10.0.0.5".into(),
+            alive: true,
+            mac: "AA:00:00:00:00:01".into(),
+            ..Default::default()
+        };
+        let mut good = scan(0, vec![host]);
+        good.summary.alive = 1;
+        let first = save(&mut conn, &good.summary, &good.hosts).unwrap();
+
+        // The same targets, nothing found, marked suspect by the caller.
+        let empty = ScanSummary {
+            alive: 0,
+            suspect: true,
+            ..good.summary.clone()
+        };
+        save(&mut conn, &empty, &[]).unwrap();
+
+        // The next real scan compares against the last good one, not the gap.
+        let next = ScanSummary {
+            alive: 1,
+            ..good.summary.clone()
+        };
+        let id = save(&mut conn, &next, &good.hosts).unwrap();
+        let saved = load(&conn, id).unwrap().summary;
+        assert_eq!(baseline_for(&conn, &saved).unwrap(), Some(first));
+    }
+
+    /// Whether a scan *is* suspect: nothing found where something was before.
+    #[test]
+    fn the_previous_comparable_scan_is_what_judges_it() {
+        let mut conn = open(Path::new(":memory:")).unwrap();
+        let mut populated = scan(0, vec![]);
+        populated.summary.alive = 11;
+        save(&mut conn, &populated.summary, &[]).unwrap();
+
+        let empty = ScanSummary {
+            alive: 0,
+            ..populated.summary.clone()
+        };
+        let previous = latest_comparable(&conn, &empty).unwrap().unwrap();
+        assert_eq!(previous.alive, 11, "so finding nothing now is suspicious");
+
+        // Somewhere genuinely new has nothing to be suspicious about.
+        let elsewhere = ScanSummary {
+            targets: "172.16.9.0/24".into(),
+            range_start: "172.16.9.1".into(),
+            range_end: "172.16.9.254".into(),
+            alive: 0,
+            ..populated.summary.clone()
+        };
+        assert!(latest_comparable(&conn, &elsewhere).unwrap().is_none());
+    }
+
     #[test]
     fn baselines_match_on_what_was_asked_for() {
         let mut conn = open(Path::new(":memory:")).unwrap();
         let spec = |targets: &str, start: &str, end: &str| ScanSummary {
             id: 0,
             profile_id: None,
+            suspect: false,
             targets: targets.into(),
             range_start: start.into(),
             range_end: end.into(),

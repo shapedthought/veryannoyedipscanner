@@ -149,6 +149,7 @@ mod tests {
         history::ScanSummary {
             id: 0,
             profile_id: None,
+            suspect: false,
             targets: format!("{range_start}/24"),
             range_start: range_start.into(),
             range_end: range_start.into(),

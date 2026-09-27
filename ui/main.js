@@ -100,6 +100,7 @@ const state = {
   profiles: [],
   profile: null,        // the network we're scanning under
   network: null,        // what we detected about where we are
+  declined: null,       // a fingerprint we've already been told not to ask about
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -753,6 +754,7 @@ function renderHistory() {
         h("div", { class: "top" },
           h("strong", {}, fmtDate(scan.finished_at)),
           h("span", { class: "muted" }, ago(scan.finished_at)),
+          scan.suspect && h("span", { class: "badge change", title: "Found nothing where something was expected, so it isn't used as a baseline" }, "IGNORED"),
         ),
         h("div", { class: "sub" }, `${scan.range_start} – ${scan.range_end}`),
         h("div", { class: "sub" },
@@ -949,6 +951,19 @@ listen("scan-done", async ({ payload }) => {
   }
   if (payload.error) toast(payload.error, true);
 
+  if (payload.suspect) {
+    // Nothing found where there was something last time: almost always the
+    // scan's fault, so say so rather than reporting an empty network.
+    setScanning(false);
+    await refreshHistory();
+    renderHistory();
+    setStatus(`${tally} That's nothing at all, where there was something last time. ` +
+      "Wrong network? Wrong range? I've kept it out of the comparisons.");
+    toast("Found nothing. Not using that as a baseline.", true);
+    updateTray();
+    return;
+  }
+
   await Promise.all([refreshHistory(), refreshDevices()]);
   state.currentScan = state.history.find((s) => s.id === payload.scan_id) ?? null;
   renderHistory();
@@ -1066,7 +1081,8 @@ async function exportAs(kind) {
 function renderProfiles() {
   fill(el.profile,
     ...state.profiles.map((p) => h("option", { value: p.id }, p.name)),
-    h("option", { value: "" }, state.profiles.length ? "Not set" : "No networks yet"));
+    h("option", { value: "" }, state.profiles.length ? "Not set" : "No networks yet"),
+    state.network && !state.network.profile && h("option", { value: "new" }, "Add this network…"));
   el.profile.value = state.profile ? String(state.profile.id) : "";
 }
 
@@ -1104,7 +1120,8 @@ async function checkNetwork({ askIfUnknown = true } = {}) {
   // Somewhere new: don't let the previous network's history apply to it.
   if (state.profile) await setProfile(null);
   renderProfiles();
-  if (askIfUnknown) askAboutNetwork();
+  // Asked once and waved away: don't nag on every scan.
+  if (askIfUnknown && state.declined !== state.network.fingerprint.id) askAboutNetwork();
 }
 
 function askAboutNetwork() {
@@ -1137,6 +1154,7 @@ function askAboutNetwork() {
 async function rememberNetwork() {
   const fingerprint = state.network?.fingerprint;
   if (!fingerprint) return;
+  state.declined = null;
   const targets = el.askTargets.value.trim() || fingerprint.subnet;
   try {
     const profile = await invoke("create_profile", {
@@ -1396,6 +1414,11 @@ for (const input of [el.targets, el.ports, el.timeout, el.threads]) {
 }
 el.hideDead.addEventListener("change", renderAll);
 el.profile.addEventListener("change", async () => {
+  if (el.profile.value === "new") {
+    renderProfiles(); // put the selection back while the dialog decides
+    askAboutNetwork();
+    return;
+  }
   const id = el.profile.value ? Number(el.profile.value) : null;
   const profile = await setProfile(id);
   setStatus(profile ? `Scanning as ${profile.name}.` : "No network profile. Nothing is compared.");
@@ -1403,7 +1426,9 @@ el.profile.addEventListener("change", async () => {
 el.askCreate.addEventListener("click", rememberNetwork);
 el.askSkip.addEventListener("click", () => {
   el.ask.hidden = true;
-  setStatus("Fine, stay anonymous. This scan won't be compared with anything.");
+  state.declined = state.network?.fingerprint?.id ?? null;
+  setStatus("Fine, stay anonymous. Nothing here is compared with anywhere else. " +
+    "Say “Add this network” in the Network menu if you change your mind.");
 });
 el.askProfile.addEventListener("change", async () => {
   if (!el.askProfile.value) return;

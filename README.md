@@ -32,6 +32,9 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   belong to a profile, so one network is never compared against another. A
   network it doesn't recognise gets a prompt rather than a silent mess, and
   each profile remembers what to scan there.
+- **A scan that finds nothing** where there was something last time is called
+  out and kept out of the comparisons, rather than quietly becoming the
+  baseline that makes everything look new next time.
 - **A history per device**: how many of the scans that looked here it answered,
   a strip showing when it was present, and the moments worth naming — first
   seen, address changes, ports opening and closing.
