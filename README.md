@@ -50,7 +50,12 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
 - **Filter as you type** (⌘F): plain text searches the whole row, `port:22`,
   `vendor:apple`, `name:`, `via:` and friends search one field, and bare words
   like `new`, `unknown`, `risk` or `-dead` match what a row *is*. Terms combine.
-- Sortable columns, hide dead hosts, right-click to copy/rescan, CSV export
+- **Exports**: the table as CSV, the whole scan as JSON (services,
+  certificates, findings, your labels), or just the changes as JSON.
+- **Webhook on change**: post that same changes payload to a URL when a scan
+  finds something. Slack and Discord webhook URLs work as they are, since the
+  payload carries `text` and `content` alongside the structured fields.
+- Sortable columns, hide dead hosts, right-click to copy/rescan
 - Complains constantly
 
 ## Run

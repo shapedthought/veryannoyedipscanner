@@ -60,7 +60,10 @@ const el = {
   menu: $("menu"), toast: $("toast"),
   panel: $("panel"), togglePanel: $("togglePanel"), closePanel: $("closePanel"),
   changeCount: $("changeCount"),
-  tabs: { host: $("tab-host"), changes: $("tab-changes"), history: $("tab-history") },
+  tabs: {
+    host: $("tab-host"), changes: $("tab-changes"),
+    history: $("tab-history"), settings: $("tab-settings"),
+  },
 };
 const COLUMNS = ["ip", "ping", "hostname", "vendor", "mac", "ports", "details"];
 const HEADINGS = {
@@ -90,6 +93,7 @@ const state = {
   tab: "host",
   filterTerms: [],      // parsed once per keystroke, not once per row
   timeline: null,       // device history for the selected host, if loaded
+  settings: {},         // webhook url and friends, as stored by the backend
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -397,6 +401,7 @@ function openPanel(tab = state.tab) {
   }
   if (tab === "changes") renderChanges();
   if (tab === "history") refreshHistory();
+  if (tab === "settings") renderSettings();
 }
 
 function closePanel() {
@@ -661,6 +666,61 @@ async function setApproved(host, approved) {
   }
 }
 
+async function loadSettings() {
+  try {
+    state.settings = await invoke("get_settings");
+  } catch (err) {
+    console.warn("settings failed", err);
+  }
+}
+
+async function saveSetting(key, value) {
+  state.settings[key] = value;
+  try {
+    await invoke("set_setting", { key, value });
+  } catch (err) {
+    toast(String(err), true);
+  }
+}
+
+function renderSettings() {
+  const body = el.tabs.settings;
+  const url = h("input", {
+    type: "url",
+    value: state.settings.webhook_url ?? "",
+    placeholder: "https://hooks.slack.com/services/…",
+  });
+  const onChange = h("input", { type: "checkbox" });
+  onChange.checked = state.settings.webhook_on_change === "yes";
+
+  url.addEventListener("change", () => saveSetting("webhook_url", url.value.trim()));
+  onChange.addEventListener("change", () =>
+    saveSetting("webhook_on_change", onChange.checked ? "yes" : "no"));
+
+  fill(body,
+    h("h3", {}, "Webhook"),
+    h("p", { class: "muted" },
+      "Posts JSON when a scan finds changes: what arrived, what left, what opened a port. " +
+      "Slack and Discord webhook URLs work as they are; anything else gets the same JSON."),
+    h("label", { class: "field" }, "URL", url),
+    h("label", { class: "check" }, onChange, " Send it when a scan finds changes"),
+    h("div", { class: "device-actions" },
+      h("button", { type: "button", class: "small", onclick: async () => {
+        if (!url.value.trim()) return toast("Give it a URL first.");
+        await saveSetting("webhook_url", url.value.trim());
+        setStatus("Poking the webhook…");
+        await sendWebhook({
+          text: "Very Annoyed IP Scanner: test message. Ignore me.",
+          content: "Very Annoyed IP Scanner: test message. Ignore me.",
+          test: true,
+        });
+      } }, "Send a test"),
+    ),
+    h("p", { class: "muted" },
+      "Whatever you point this at will see device names, addresses and open ports."),
+  );
+}
+
 async function refreshHistory() {
   try {
     state.history = await invoke("list_scans");
@@ -890,6 +950,9 @@ listen("scan-done", async ({ payload }) => {
     openPanel("changes");
   }
   updateTray();
+  if (diff && n > 0 && state.settings.webhook_on_change === "yes") {
+    sendWebhook(changesPayload(), { quiet: true });
+  }
   // Only for scans you didn't start: you're already looking at the others.
   if (state.autoStarted && diff) await notifyAbout(diff);
   state.autoStarted = false;
@@ -940,16 +1003,92 @@ async function previewTargets() {
   }
 }
 
-async function exportCsv() {
-  if (!state.hosts.size) return toast("Export what? You haven't scanned anything.");
+function csvContent() {
   const quote = (v) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
   const lines = [COLUMNS.map((c) => HEADINGS[c]).join(",")];
   for (const host of state.view) lines.push(COLUMNS.map((c) => quote(String(cell(host, c)))).join(","));
+  return lines.join("\n") + "\n";
+}
+
+/** The whole scan: hosts as the backend gave them, plus your labels. */
+function scanJson() {
+  return JSON.stringify({
+    scan: state.currentScan,
+    exported_at: new Date().toISOString(),
+    hosts: state.view.map((host) => ({
+      ...host,
+      label: deviceFor(host)?.label ?? "",
+      approved: deviceFor(host)?.approved ?? false,
+    })),
+  }, null, 2);
+}
+
+/** The diff, in the shape the Changes tab shows and webhooks receive. */
+function changesJson() {
+  return JSON.stringify({ ...changesPayload(), exported_at: new Date().toISOString() }, null, 2);
+}
+
+async function exportAs(kind) {
+  if (!state.hosts.size) return toast("Export what? You haven't scanned anything.");
+  if (kind === "changes" && !state.diff) return toast("No changes to export. Scan the same range twice.");
+  const stamp = new Date().toISOString().slice(0, 10);
+  const { content, name, extension } = {
+    csv: { content: csvContent(), name: `annoyed-scan-${stamp}.csv`, extension: "csv" },
+    json: { content: scanJson(), name: `annoyed-scan-${stamp}.json`, extension: "json" },
+    changes: { content: changesJson(), name: `annoyed-changes-${stamp}.json`, extension: "json" },
+  }[kind];
   try {
-    const path = await invoke("save_csv", { content: lines.join("\n") + "\n" });
+    const path = await invoke("save_export", { content, fileName: name, extension });
     if (path) setStatus(`Exported to ${path}. Fine.`);
   } catch (err) {
     toast(`Couldn't save that.\n${err}`, true);
+  }
+}
+
+// --------------------------------------------------------------------------
+// Webhook
+// --------------------------------------------------------------------------
+
+/** The diff, plus a sentence. `text` and `content` are what Slack and Discord
+ *  render, so a plain webhook URL from either works without any mapping. */
+function changesPayload() {
+  const diff = state.diff;
+  const name = (host) => displayName(host) || host.vendor || host.ip;
+  const brief = diff ? diffSummary(diff) : "nothing";
+  const sentence = `Very Annoyed IP Scanner: ${brief} since ${fmtDate(diff?.old?.finished_at ?? Date.now())}`;
+  const describe = (host) => ({
+    ip: host.ip,
+    name: name(host),
+    mac: host.mac,
+    vendor: host.vendor,
+    ports: host.ports,
+    approved: deviceFor(host)?.approved ?? false,
+  });
+  return {
+    text: sentence,
+    content: sentence,
+    scan: diff?.new ?? state.currentScan,
+    since: diff?.old ?? null,
+    added: (diff?.added ?? []).map(describe),
+    gone: (diff?.gone ?? []).map(describe),
+    changed: (diff?.changed ?? []).map((change) => ({
+      ...describe(change.host),
+      opened: change.opened,
+      closed: change.closed,
+      moved_from: change.old_ip ?? null,
+      previous_mac: change.old_mac ?? null,
+    })),
+  };
+}
+
+async function sendWebhook(payload, { quiet = false } = {}) {
+  const url = state.settings.webhook_url?.trim();
+  if (!url) return;
+  try {
+    const answer = await invoke("send_webhook", { url, payload });
+    if (!quiet) setStatus(`Webhook accepted it: ${answer}`);
+  } catch (err) {
+    toast(`Webhook failed.\n${err}`, true);
   }
 }
 
@@ -1160,7 +1299,11 @@ el.filter.addEventListener("keydown", (e) => {
   }
 });
 el.auto.addEventListener("change", () => setSchedule(Number(el.auto.value)));
-el.exportBtn.addEventListener("click", exportCsv);
+el.exportBtn.addEventListener("change", () => {
+  const kind = el.exportBtn.value;
+  el.exportBtn.value = "";
+  if (kind) exportAs(kind);
+});
 
 // --------------------------------------------------------------------------
 // Boot
@@ -1175,5 +1318,6 @@ invoke("local_range").then((r) => {
   previewTargets();
 });
 refreshHistory();
+loadSettings();
 refreshDevices().then(renderAll);
 updateChrome();

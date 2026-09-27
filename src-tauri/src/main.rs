@@ -12,12 +12,14 @@ mod risk;
 mod scanner;
 mod tray;
 mod vendor;
+mod webhook;
 
 use devices::Device;
 use discovery::Announcements;
 use history::{Db, DeviceHistory, Diff, SavedScan, ScanSummary};
 use scanner::{Cancel, HostResult, Options, Range};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -290,6 +292,22 @@ fn delete_scan(db: State<'_, Db>, id: i64) -> Result<(), String> {
     history::delete(&*db.conn()?, id).map_err(db_err)
 }
 
+#[tauri::command]
+fn get_settings(db: State<'_, Db>) -> Result<HashMap<String, String>, String> {
+    history::settings(&*db.conn()?).map_err(db_err)
+}
+
+#[tauri::command]
+fn set_setting(db: State<'_, Db>, key: String, value: String) -> Result<(), String> {
+    history::set_setting(&*db.conn()?, &key, &value).map_err(db_err)
+}
+
+/// POST a payload to the configured webhook. Returns what it answered.
+#[tauri::command]
+async fn send_webhook(url: String, payload: serde_json::Value) -> Result<String, String> {
+    webhook::post(&url, &payload).await
+}
+
 /// Menu-bar summary: the count sits next to the icon, the sentence is the
 /// first line of its menu.
 #[tauri::command]
@@ -348,15 +366,20 @@ fn forget_device(db: State<'_, Db>, key: String) -> Result<(), String> {
     devices::forget(&*db.conn()?, &key).map_err(db_err)
 }
 
-/// Ask where to save, then write the CSV. Returns the path, or None if the
+/// Ask where to save, then write the file. Returns the path, or None if the
 /// user bailed out of the dialog.
 #[tauri::command]
-async fn save_csv(app: AppHandle, content: String) -> Result<Option<String>, String> {
+async fn save_export(
+    app: AppHandle,
+    content: String,
+    file_name: String,
+    extension: String,
+) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("CSV", &["csv"])
-        .set_file_name("annoyed-scan.csv")
+        .add_filter(extension.to_uppercase(), &[extension.as_str()])
+        .set_file_name(file_name)
         .save_file(move |path| {
             let _ = tx.send(path);
         });
@@ -409,7 +432,10 @@ fn main() {
             load_scan,
             compare_scans,
             delete_scan,
-            save_csv
+            save_export,
+            get_settings,
+            set_setting,
+            send_webhook
         ])
         .build(tauri::generate_context!())
         .expect("error while running Very Annoyed IP Scanner")
