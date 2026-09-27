@@ -48,6 +48,8 @@ struct RowEvent {
 struct DoneEvent {
     generation: u64,
     cancelled: bool,
+    /// Found nothing where something was expected; not used as a baseline.
+    suspect: bool,
     /// Id of the saved scan (None if cancelled or saving failed).
     scan_id: Option<i64>,
     /// Changes since the previous scan of the same range, if there was one.
@@ -180,6 +182,7 @@ fn start_scan(
         let mut event = DoneEvent {
             generation,
             cancelled,
+            suspect: false,
             scan_id: None,
             diff: None,
             error: None,
@@ -187,8 +190,9 @@ fn start_scan(
         // A partial scan would make everything it didn't reach look "gone",
         // so only complete scans go into history.
         if !cancelled {
-            let summary = ScanSummary {
+            let mut summary = ScanSummary {
                 id: 0,
+                suspect: false,
                 profile_id: active_profile(&app),
                 started_at,
                 finished_at: now_ms(),
@@ -199,6 +203,8 @@ fn start_scan(
                 total: total as i64,
                 alive: results.iter().filter(|h| h.alive).count() as i64,
             };
+            summary.suspect = is_suspect(&app, &summary);
+            event.suspect = summary.suspect;
             match save_and_diff(&app, summary, &results) {
                 Ok((id, diff)) => {
                     event.scan_id = Some(id);
@@ -230,6 +236,20 @@ async fn merge_announcement(host: &mut HostResult, announced: Option<&discovery:
         host.alive_via = "mdns".into();
         scanner::fill_identity(host).await;
     }
+}
+
+/// Finding nothing where the last comparable scan found something almost
+/// always means the scan went wrong, not that the network emptied.
+fn is_suspect(app: &AppHandle, summary: &ScanSummary) -> bool {
+    if summary.alive > 0 {
+        return false;
+    }
+    let db = app.state::<Db>();
+    let Ok(conn) = db.conn() else { return false };
+    history::latest_comparable(&conn, summary)
+        .ok()
+        .flatten()
+        .is_some_and(|previous| previous.alive > 0)
 }
 
 /// The profile the user is scanning under, remembered between launches.

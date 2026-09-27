@@ -184,6 +184,7 @@ mod tests {
         let scan = crate::history::ScanSummary {
             id: 0,
             profile_id: Some(home.id),
+            suspect: false,
             targets: "10.0.0.0/24".into(),
             range_start: "10.0.0.1".into(),
             range_end: "10.0.0.254".into(),
