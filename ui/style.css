@@ -262,6 +262,33 @@ progress { width: 180px; accent-color: var(--accent); }
 
 .toast.error { background: var(--accent); color: var(--accent-text); }
 
+/* -- dialog -------------------------------------------------------------- */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.dialog {
+  width: min(460px, 90vw);
+  padding: 18px 20px 16px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.dialog h2 { margin: 0 0 6px; font-size: 16px; }
+.dialog p { margin: 6px 0; }
+.dialog .device-actions { margin-top: 14px; }
+
 button.small { padding: 2px 10px; font-size: 12px; }
 button.icon { border: none; background: none; padding: 2px 6px; color: var(--muted); }
 

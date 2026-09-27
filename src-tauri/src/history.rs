@@ -21,6 +21,10 @@ impl Db {
 #[derive(Serialize, Clone, Debug)]
 pub struct ScanSummary {
     pub id: i64,
+    /// Which network this was scanned on. None for scans saved before
+    /// profiles existed, and never matched against a profiled scan.
+    #[serde(default)]
+    pub profile_id: Option<i64>,
     pub started_at: i64,
     pub finished_at: i64,
     /// The targets as typed, e.g. "192.168.0.0/24, 10.0.1.5". Empty for scans
@@ -103,6 +107,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
          );",
     )?;
     crate::devices::create_table(&conn)?;
+    crate::profiles::create_table(&conn)?;
     Ok(conn)
 }
 
@@ -138,8 +143,8 @@ pub fn save(
 ) -> rusqlite::Result<i64> {
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO scans (started_at, finished_at, range_start, range_end, ports, total, alive, targets)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO scans (started_at, finished_at, range_start, range_end, ports, total, alive, targets, profile_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             summary.started_at,
             summary.finished_at,
@@ -149,6 +154,7 @@ pub fn save(
             summary.total,
             summary.alive,
             summary.targets,
+            summary.profile_id,
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -176,17 +182,21 @@ fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<ScanSummary> {
         total: row.get(6)?,
         alive: row.get(7)?,
         targets: row.get(8)?,
+        profile_id: row.get(9)?,
     })
 }
 
 const SUMMARY_COLS: &str =
-    "id, started_at, finished_at, range_start, range_end, ports, total, alive, targets";
+    "id, started_at, finished_at, range_start, range_end, ports, total, alive, targets, profile_id";
 
-pub fn list(conn: &Connection) -> rusqlite::Result<Vec<ScanSummary>> {
+/// History for one network, or everything when no profile is active.
+pub fn list(conn: &Connection, profile_id: Option<i64>) -> rusqlite::Result<Vec<ScanSummary>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SUMMARY_COLS} FROM scans ORDER BY id DESC"
+        "SELECT {SUMMARY_COLS} FROM scans
+         WHERE ?1 IS NULL OR profile_id IS ?1
+         ORDER BY id DESC"
     ))?;
-    let rows = stmt.query_map([], summary_from_row)?;
+    let rows = stmt.query_map([profile_id], summary_from_row)?;
     rows.collect()
 }
 
@@ -213,15 +223,23 @@ pub fn delete(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 /// The most recent earlier scan of exactly the same range, used as the
 /// automatic baseline for "what changed since last time".
 pub fn baseline_for(conn: &Connection, scan: &ScanSummary) -> rusqlite::Result<Option<i64>> {
-    // Match on the written targets where we have them, so "the same scan"
-    // means the same instruction rather than a coincidentally equal span.
+    // Same network first: a scan at someone else's house is not a baseline
+    // for yours, however similar the addresses look. Then match on the
+    // written targets, so "the same scan" means the same instruction.
     conn.query_row(
         "SELECT id FROM scans
          WHERE id < ?1
+           AND profile_id IS ?5
            AND CASE WHEN ?2 != '' AND targets != '' THEN targets = ?2
                     ELSE range_start = ?3 AND range_end = ?4 END
          ORDER BY id DESC LIMIT 1",
-        params![scan.id, scan.targets, scan.range_start, scan.range_end],
+        params![
+            scan.id,
+            scan.targets,
+            scan.range_start,
+            scan.range_end,
+            scan.profile_id
+        ],
         |row| row.get(0),
     )
     .optional()
@@ -452,6 +470,7 @@ mod tests {
         SavedScan {
             summary: ScanSummary {
                 id,
+                profile_id: None,
                 started_at: 0,
                 finished_at: 0,
                 targets: "10.0.0.1-254".into(),
@@ -538,7 +557,7 @@ mod tests {
         drop(old);
 
         let conn = open(&path).unwrap();
-        let scans = list(&conn).unwrap();
+        let scans = list(&conn, None).unwrap();
         assert_eq!(scans.len(), 1);
         assert_eq!(scans[0].targets, "", "old rows have no written targets");
 
@@ -546,6 +565,7 @@ mod tests {
         let mut conn = conn;
         let next = ScanSummary {
             id: 0,
+            profile_id: None,
             targets: "10.0.0.1-254".into(),
             range_start: "10.0.0.1".into(),
             range_end: "10.0.0.254".into(),
@@ -633,6 +653,7 @@ mod tests {
         let mut conn = open(Path::new(":memory:")).unwrap();
         let spec = |targets: &str, start: &str, end: &str| ScanSummary {
             id: 0,
+            profile_id: None,
             targets: targets.into(),
             range_start: start.into(),
             range_end: end.into(),
@@ -674,7 +695,7 @@ mod tests {
         let id2 = save(&mut conn, &second.summary, &second.hosts).unwrap();
 
         assert_eq!(
-            list(&conn)
+            list(&conn, None)
                 .unwrap()
                 .iter()
                 .map(|s| s.id)
@@ -687,7 +708,7 @@ mod tests {
         assert_eq!(baseline_for(&conn, &s2).unwrap(), Some(id1));
 
         delete(&conn, id1).unwrap();
-        assert_eq!(list(&conn).unwrap().len(), 1);
+        assert_eq!(list(&conn, None).unwrap().len(), 1);
         let orphans: i64 = conn
             .query_row("SELECT COUNT(*) FROM hosts", [], |r| r.get(0))
             .unwrap();

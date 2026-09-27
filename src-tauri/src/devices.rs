@@ -118,12 +118,26 @@ pub fn record_sightings(
     tx.commit()
 }
 
-/// Whether the user has started approving devices at all. Until they have,
-/// flagging every device as unknown would be noise.
-pub fn any_approved(conn: &Connection) -> rusqlite::Result<bool> {
+/// Whether the user has started approving devices *on this network*. Until
+/// they have, flagging every device as unknown would be noise - and arriving
+/// somewhere new shouldn't light up every row just because you've curated a
+/// different network.
+pub fn any_approved(conn: &Connection, profile_id: Option<i64>) -> rusqlite::Result<bool> {
+    let Some(profile_id) = profile_id else {
+        return conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE approved != 0)",
+            [],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        );
+    };
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM devices WHERE approved != 0)",
-        [],
+        "SELECT EXISTS(
+             SELECT 1 FROM devices d
+             JOIN hosts h ON h.key = d.key
+             JOIN scans s ON s.id = h.scan_id
+             WHERE d.approved != 0 AND s.profile_id = ?1
+         )",
+        [profile_id],
         |row| Ok(row.get::<_, i64>(0)? != 0),
     )
 }
@@ -158,6 +172,37 @@ mod tests {
         conn
     }
 
+    /// Approvals are per network: curating home shouldn't flag every device
+    /// at someone else's house, or leave it silently unflagged either.
+    #[test]
+    fn approval_is_judged_per_network() {
+        let mut conn = crate::history::open(Path::new(":memory:")).unwrap();
+        let home = crate::profiles::create(&conn, "Home", "gw:AA", "", "", 1).unwrap();
+        let away = crate::profiles::create(&conn, "Away", "gw:BB", "", "", 1).unwrap();
+
+        let laptop = host("10.0.0.5", "AA:00:00:00:00:01");
+        let scan = crate::history::ScanSummary {
+            id: 0,
+            profile_id: Some(home.id),
+            targets: "10.0.0.0/24".into(),
+            range_start: "10.0.0.1".into(),
+            range_end: "10.0.0.254".into(),
+            ports: vec![22],
+            started_at: 0,
+            finished_at: 0,
+            total: 254,
+            alive: 1,
+        };
+        crate::history::save(&mut conn, &scan, std::slice::from_ref(&laptop)).unwrap();
+        set_approved(&conn, &key_for(&laptop), true, 10).unwrap();
+
+        assert!(any_approved(&conn, Some(home.id)).unwrap());
+        assert!(
+            !any_approved(&conn, Some(away.id)).unwrap(),
+            "nothing has been approved on this network yet"
+        );
+    }
+
     #[test]
     fn identity_prefers_mac_and_falls_back_to_ip() {
         assert_eq!(
@@ -187,7 +232,7 @@ mod tests {
     #[test]
     fn sightings_create_devices_and_track_time() {
         let mut conn = db();
-        assert!(!any_approved(&conn).unwrap());
+        assert!(!any_approved(&conn, None).unwrap());
 
         let hosts = [host("10.0.0.1", "AA:00:00:00:00:01"), host("10.0.0.2", "")];
         record_sightings(&mut conn, &hosts, 1_000).unwrap();
@@ -203,13 +248,13 @@ mod tests {
         assert_eq!(devices["AA:00:00:00:00:01"].first_seen, 1_000);
 
         set_approved(&conn, "AA:00:00:00:00:01", true, 3_000).unwrap();
-        assert!(any_approved(&conn).unwrap());
+        assert!(any_approved(&conn, None).unwrap());
         // Approving mustn't disturb when it was first seen.
         assert_eq!(by_key(&conn)["AA:00:00:00:00:01"].first_seen, 1_000);
 
         forget(&conn, "AA:00:00:00:00:01").unwrap();
         assert_eq!(list(&conn).unwrap().len(), 1);
-        assert!(!any_approved(&conn).unwrap());
+        assert!(!any_approved(&conn, None).unwrap());
     }
 
     #[test]

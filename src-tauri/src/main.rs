@@ -7,7 +7,9 @@ mod dns;
 mod fdlimit;
 mod history;
 mod icmp;
+mod network;
 mod probe;
+mod profiles;
 mod risk;
 mod scanner;
 mod tray;
@@ -17,6 +19,8 @@ mod webhook;
 use devices::Device;
 use discovery::Announcements;
 use history::{Db, DeviceHistory, Diff, SavedScan, ScanSummary};
+use network::Fingerprint;
+use profiles::Profile;
 use scanner::{Cancel, HostResult, Options, Range};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -185,6 +189,7 @@ fn start_scan(
         if !cancelled {
             let summary = ScanSummary {
                 id: 0,
+                profile_id: active_profile(&app),
                 started_at,
                 finished_at: now_ms(),
                 targets: spec,
@@ -225,6 +230,16 @@ async fn merge_announcement(host: &mut HostResult, announced: Option<&discovery:
         host.alive_via = "mdns".into();
         scanner::fill_identity(host).await;
     }
+}
+
+/// The profile the user is scanning under, remembered between launches.
+fn active_profile(app: &AppHandle) -> Option<i64> {
+    let db = app.state::<Db>();
+    let conn = db.conn().ok()?;
+    history::settings(&conn)
+        .ok()?
+        .get("active_profile")
+        .and_then(|id| id.parse().ok())
 }
 
 fn save_and_diff(
@@ -268,8 +283,95 @@ async fn rescan_host(ip: String, ports: String, options: Options) -> Result<Host
 }
 
 #[tauri::command]
-fn list_scans(db: State<'_, Db>) -> Result<Vec<ScanSummary>, String> {
-    history::list(&*db.conn()?).map_err(db_err)
+fn list_scans(db: State<'_, Db>, profile_id: Option<i64>) -> Result<Vec<ScanSummary>, String> {
+    history::list(&*db.conn()?, profile_id).map_err(db_err)
+}
+
+#[derive(Serialize)]
+struct NetworkNow {
+    fingerprint: Fingerprint,
+    suggested_name: String,
+    /// The profile this network is already known as, if any.
+    profile: Option<Profile>,
+}
+
+/// Which network are we on, and do we know it?
+#[tauri::command]
+async fn current_network(app: AppHandle) -> Result<NetworkNow, String> {
+    let fingerprint = network::detect().await;
+    let suggested_name = network::suggested_name(&fingerprint);
+    let db = app.state::<Db>();
+    let profile = {
+        let conn = db.conn()?;
+        let found = profiles::by_fingerprint(&conn, &fingerprint.id).map_err(db_err)?;
+        if let Some(profile) = &found {
+            profiles::touch(&conn, profile.id, now_ms()).map_err(db_err)?;
+        }
+        found
+    };
+    Ok(NetworkNow {
+        fingerprint,
+        suggested_name,
+        profile,
+    })
+}
+
+#[tauri::command]
+fn list_profiles(db: State<'_, Db>) -> Result<Vec<Profile>, String> {
+    profiles::list(&*db.conn()?).map_err(db_err)
+}
+
+/// Remember this network under a name, and adopt its earlier scans.
+#[tauri::command]
+fn create_profile(
+    db: State<'_, Db>,
+    name: String,
+    fingerprint: String,
+    targets: String,
+    subnet: String,
+) -> Result<Profile, String> {
+    let conn = db.conn()?;
+    // "192.168.0.0/24" -> "192.168.0.", the prefix its old scans start with.
+    let prefix = subnet
+        .split_once('/')
+        .map(|(addr, _)| {
+            addr.rsplit_once('.')
+                .map_or(String::new(), |(head, _)| format!("{head}."))
+        })
+        .unwrap_or_default();
+    let profile = profiles::create(&conn, &name, &fingerprint, &targets, &prefix, now_ms())
+        .map_err(db_err)?;
+    history::set_setting(&conn, "active_profile", &profile.id.to_string()).map_err(db_err)?;
+    Ok(profile)
+}
+
+#[tauri::command]
+fn use_profile(db: State<'_, Db>, id: Option<i64>) -> Result<Option<Profile>, String> {
+    let conn = db.conn()?;
+    let value = id.map(|id| id.to_string()).unwrap_or_default();
+    history::set_setting(&conn, "active_profile", &value).map_err(db_err)?;
+    match id {
+        Some(id) => {
+            profiles::touch(&conn, id, now_ms()).map_err(db_err)?;
+            profiles::get(&conn, id).map_err(db_err)
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn rename_profile(db: State<'_, Db>, id: i64, name: String) -> Result<(), String> {
+    profiles::rename(&*db.conn()?, id, &name).map_err(db_err)
+}
+
+#[tauri::command]
+fn remember_targets(db: State<'_, Db>, id: i64, targets: String) -> Result<(), String> {
+    profiles::remember_targets(&*db.conn()?, id, &targets).map_err(db_err)
+}
+
+#[tauri::command]
+fn forget_profile(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    profiles::delete(&*db.conn()?, id).map_err(db_err)
 }
 
 #[tauri::command]
@@ -342,8 +444,8 @@ fn list_devices(db: State<'_, Db>) -> Result<Vec<Device>, String> {
 /// True once the user has approved anything: until then, flagging every
 /// device as unknown would be noise.
 #[tauri::command]
-fn approvals_in_use(db: State<'_, Db>) -> Result<bool, String> {
-    devices::any_approved(&*db.conn()?).map_err(db_err)
+fn approvals_in_use(db: State<'_, Db>, profile_id: Option<i64>) -> Result<bool, String> {
+    devices::any_approved(&*db.conn()?, profile_id).map_err(db_err)
 }
 
 #[tauri::command]
@@ -421,6 +523,13 @@ fn main() {
             stop_scan,
             rescan_host,
             list_scans,
+            current_network,
+            list_profiles,
+            create_profile,
+            use_profile,
+            rename_profile,
+            remember_targets,
+            forget_profile,
             notify,
             update_tray,
             device_history,
