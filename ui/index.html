@@ -49,6 +49,10 @@
       <label class="check">
         <input id="hideDead" type="checkbox" /> Hide dead hosts
       </label>
+      <span class="views">
+        <button id="viewTable" type="button" class="view active">Table</button>
+        <button id="viewMap" type="button" class="view">Map</button>
+      </span>
       <span class="grow"></span>
       <input id="filter" class="filter" type="search" spellcheck="false"
              placeholder="Filter: synology, port:22, vendor:apple, new, risk, -dead"
@@ -63,6 +67,18 @@
   </header>
 
   <div class="workspace">
+    <main id="mapWrap" class="map-wrap" hidden>
+      <svg id="map" class="map"></svg>
+      <div id="mapEmpty" class="empty">Scan something and I'll draw it.</div>
+      <div class="legend">
+        <span><i class="dot"></i> device · bigger means more open ports</span>
+        <span><i class="dot risk"></i> something worth a look</span>
+        <span><i class="dot dashed"></i> not approved</span>
+        <span class="muted">rings: round-trip time</span>
+      </div>
+      <div id="mapTip" class="maptip" hidden></div>
+    </main>
+
     <main class="table-wrap">
       <table>
         <thead>
@@ -155,6 +171,7 @@
   </div>
 
   <script src="filter.js"></script>
+  <script src="map.js"></script>
   <script src="main.js"></script>
 </body>
 </html>
