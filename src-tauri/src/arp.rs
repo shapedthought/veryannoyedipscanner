@@ -32,7 +32,7 @@ fn cache() -> &'static Mutex<Cache> {
 
 // The layouts differ per tool, so take the first address of each kind on the
 // line rather than trying to match a fixed shape:
-//   macOS: ? (192.168.0.1) at ac:f8:cc:8a:1e:46 on en0 ifscope [ethernet]
+//   macOS: ? (192.168.0.1) at b8:27:eb:12:34:56 on en0 ifscope [ethernet]
 //   Linux: 192.168.0.10 dev eth0 lladdr 00:11:32:aa:bb:cc REACHABLE
 fn ip_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -85,12 +85,12 @@ mod tests {
 
     #[test]
     fn parses_macos_and_linux_tables() {
-        let macos = "? (192.168.0.1) at ac:f8:cc:8a:1e:46 on en0 ifscope [ethernet]\n\
+        let macos = "? (192.168.0.1) at b8:27:eb:12:34:56 on en0 ifscope [ethernet]\n\
                      ? (192.168.0.23) at b8:27:eb:1:2:3 on en0 ifscope [ethernet]\n\
                      ? (192.168.0.99) at (incomplete) on en0 ifscope [ethernet]\n\
                      ? (224.0.0.251) at ff:ff:ff:ff:ff:ff on en0 ifscope permanent [ethernet]";
         let table = parse(macos);
-        assert_eq!(table[&"192.168.0.1".parse().unwrap()], "AC:F8:CC:8A:1E:46");
+        assert_eq!(table[&"192.168.0.1".parse().unwrap()], "B8:27:EB:12:34:56");
         assert_eq!(table[&"192.168.0.23".parse().unwrap()], "B8:27:EB:01:02:03");
         assert_eq!(
             table.len(),

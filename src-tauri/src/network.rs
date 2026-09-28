@@ -111,10 +111,13 @@ mod tests {
     fn names_a_network_as_helpfully_as_it_can() {
         let mut fingerprint = Fingerprint {
             gateway_ip: "192.168.1.1".into(),
-            gateway_mac: "AC:F8:CC:8A:1E:46".into(),
+            gateway_mac: "B8:27:EB:12:34:56".into(),
             ..Default::default()
         };
-        assert_eq!(suggested_name(&fingerprint), "Commscope network");
+        assert_eq!(
+            suggested_name(&fingerprint),
+            "Raspberry Pi Foundation network"
+        );
 
         fingerprint.ssid = "Bletchley".into();
         assert_eq!(

@@ -1,8 +1,10 @@
 [package]
 name = "very-annoyed-ip-scanner"
-version = "0.2.0"
+version = "0.3.0"
 description = "A grumpy little clone of Angry IP Scanner"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/shapedthought/veryannoyedipscanner"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
