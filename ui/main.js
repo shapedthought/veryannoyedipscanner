@@ -55,6 +55,9 @@ const el = {
   banners: $("banners"), hideDead: $("hideDead"), exportBtn: $("export"),
   attempts: $("attempts"), trustArp: $("trustArp"), discover: $("discover"),
   auto: $("auto"), filter: $("filter"), profile: $("profile"),
+  viewTable: $("viewTable"), viewMap: $("viewMap"), mapWrap: $("mapWrap"),
+  map: $("map"), mapEmpty: $("mapEmpty"), mapTip: $("mapTip"),
+  tableWrap: document.querySelector(".table-wrap"),
   ask: $("ask"), askTitle: $("askTitle"), askBody: $("askBody"), askName: $("askName"),
   askTargets: $("askTargets"), askExisting: $("askExisting"), askProfile: $("askProfile"),
   askCreate: $("askCreate"), askSkip: $("askSkip"),
@@ -104,6 +107,7 @@ const state = {
   declined: null,       // a fingerprint we've already been told not to ask about
   watches: [],          // things being kept an eye on, with recent checks
   watchTimer: null,
+  mode: "table",        // or "map"
   workingGrumble: pick(GRUMBLES.working),
 };
 
@@ -368,6 +372,7 @@ function renderAll() {
   for (const host of state.view) frag.appendChild(makeRow(host));
   el.rows.replaceChildren(frag);
   updateChrome();
+  drawMap();
 }
 
 function updateChrome() {
@@ -1088,6 +1093,157 @@ async function exportAs(kind) {
 }
 
 // --------------------------------------------------------------------------
+// The map
+// --------------------------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Like h(), but in the SVG namespace. */
+function svg(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, String(v));
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+
+function setView(mode) {
+  state.mode = mode;
+  el.mapWrap.hidden = mode !== "map";
+  el.tableWrap.hidden = mode !== "table";
+  el.viewTable.classList.toggle("active", mode === "table");
+  el.viewMap.classList.toggle("active", mode === "map");
+  if (mode === "map") drawMap();
+}
+
+/** What the layout can't know: your names, approval, findings. */
+const describeForMap = (host) => ({
+  key: deviceKey(host),
+  label: displayName(host) || host.vendor || host.ip,
+  risk: (host.risks?.length ?? 0) > 0,
+  unapproved: isUnknown(host),
+});
+
+function drawMap() {
+  if (state.mode !== "map") return;
+  const { width, height } = el.mapWrap.getBoundingClientRect();
+  // Whatever the table would show, so the filter applies to both.
+  const hosts = state.view;
+  const map = layoutMap(hosts, {
+    width: Math.max(width, 320),
+    height: Math.max(height, 240),
+    gatewayIp: state.network?.fingerprint?.gateway_ip ?? "",
+    selfIp: state.selfIp ?? "",
+    describe: describeForMap,
+  });
+
+  el.mapEmpty.hidden = hosts.length > 0;
+  el.map.setAttribute("viewBox", `0 0 ${Math.max(width, 320)} ${Math.max(height, 240)}`);
+
+  const marks = [];
+  // Rings first: they're the axis, so they sit behind everything.
+  for (const ring of map.rings) {
+    marks.push(svg("circle", { class: "ring", cx: map.cx, cy: map.cy, r: ring.radius.toFixed(1) }));
+    marks.push(svg("text", { class: "ring-label", x: map.cx, y: (map.cy - ring.radius + 12).toFixed(1) },
+      `${ring.ms} ms`));
+  }
+  // A spoke per device: the gateway is how they're all connected.
+  for (const node of map.nodes) {
+    marks.push(svg("line", {
+      class: node.risk ? "spoke risk" : "spoke",
+      x1: map.cx, y1: map.cy, x2: node.x.toFixed(1), y2: node.y.toFixed(1),
+    }));
+  }
+
+  const drawNode = (node, extraClass) => {
+    const classes = ["node", extraClass, node.risk && "risk", node.unapproved && "unapproved",
+      node.ip === state.selected && "selected"].filter(Boolean).join(" ");
+    const shape = node.kind === "gateway"
+      ? svg("rect", {
+          class: classes, x: node.x - node.size, y: node.y - node.size,
+          width: node.size * 2, height: node.size * 2, rx: 7,
+        })
+      : svg("circle", { class: classes, cx: node.x.toFixed(1), cy: node.y.toFixed(1), r: node.size });
+    shape.addEventListener("mouseenter", (e) => showMapTip(node, e));
+    shape.addEventListener("mousemove", (e) => showMapTip(node, e));
+    shape.addEventListener("mouseleave", () => (el.mapTip.hidden = true));
+    shape.addEventListener("click", () => {
+      select(node.ip);
+      drawMap();
+      openPanel("host");
+    });
+    marks.push(shape);
+    labelNode(node, marks, placed);
+  };
+
+  // Labels are identity here, not decoration, so every node gets one — but a
+  // label that would land on another label, or on any node, is dropped rather
+  // than overlapped. Seed the list with the nodes themselves.
+  const placed = [...map.nodes, map.hub].filter(Boolean).map((node) => ({
+    left: node.x - node.size,
+    right: node.x + node.size,
+    top: node.y - node.size,
+    bottom: node.y + node.size,
+  }));
+  for (const node of map.nodes) drawNode(node);
+  if (map.hub) drawNode(map.hub, "hub");
+
+  el.map.replaceChildren(...marks);
+}
+
+const truncateLabel = (text) => (text.length > 16 ? `${text.slice(0, 15)}…` : text);
+
+/** Place a label outside the node, pointing away from the hub, and only if
+ *  there's room for it. */
+function labelNode(node, marks, placed) {
+  const text = truncateLabel(node.label);
+  const away = node.kind === "gateway" ? Math.PI / 2 : node.angle;
+  const gap = node.size + 11;
+  const x = node.x + Math.cos(away) * gap;
+  const y = node.y + Math.sin(away) * gap + 4;
+  const width = text.length * 6.1;
+  const anchor = Math.abs(Math.cos(away)) < 0.4 ? "middle" : Math.cos(away) > 0 ? "start" : "end";
+  const left = anchor === "start" ? x : anchor === "end" ? x - width : x - width / 2;
+  const box = { left, right: left + width, top: y - 11, bottom: y + 3 };
+
+  const clashes = placed.some((other) =>
+    box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top);
+  if (clashes) return;
+  placed.push(box);
+  marks.push(svg("text", {
+    class: node.kind === "device" ? "label dim" : "label",
+    x: x.toFixed(1),
+    y: y.toFixed(1),
+    "text-anchor": anchor,
+  }, text));
+}
+
+function showMapTip(node, event) {
+  const host = state.hosts.get(node.ip);
+  const bounds = el.mapWrap.getBoundingClientRect();
+  fill(el.mapTip,
+    h("strong", {}, node.ip),
+    node.label !== node.ip && h("div", {}, node.label),
+    h("div", {}, node.ping_ms == null ? "answered, but no round-trip time" : `${Math.round(node.ping_ms)} ms`),
+    h("div", {}, node.ports ? `${plural(node.ports, "open port")}` : "no open ports"),
+    node.risk && h("div", {}, host?.risks?.[0]?.title ?? "worth a look"),
+    node.unapproved && h("div", {}, "not approved"),
+  );
+  el.mapTip.hidden = false;
+  const tip = el.mapTip.getBoundingClientRect();
+  const x = Math.min(event.clientX - bounds.left + 14, bounds.width - tip.width - 8);
+  const y = Math.min(event.clientY - bounds.top + 14, bounds.height - tip.height - 8);
+  el.mapTip.style.left = `${Math.max(8, x)}px`;
+  el.mapTip.style.top = `${Math.max(8, y)}px`;
+}
+
+// --------------------------------------------------------------------------
 // Watching
 // --------------------------------------------------------------------------
 
@@ -1531,6 +1687,9 @@ for (const btn of el.panel.querySelectorAll("[data-tab]")) {
 el.closePanel.addEventListener("click", closePanel);
 el.togglePanel.addEventListener("click", () => (el.panel.hidden ? openPanel() : closePanel()));
 
+el.viewTable.addEventListener("click", () => setView("table"));
+el.viewMap.addEventListener("click", () => setView("map"));
+window.addEventListener("resize", () => drawMap());
 el.scan.addEventListener("click", toggleScan);
 el.targets.addEventListener("input", previewTargets);
 el.preset.addEventListener("change", () => {
@@ -1608,6 +1767,7 @@ for (const name of Object.keys(PORT_PRESETS)) {
 }
 
 invoke("local_range").then((r) => {
+  state.selfIp = r.self ?? "";
   el.targets.value = r.cidr;
   previewTargets();
   // Then let the network we're actually on have the final say.

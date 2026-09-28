@@ -61,6 +61,10 @@ A grumpy little clone of Angry IP Scanner, built with Tauri v2 (Rust + plain HTM
   on why it matters. These are outside-view inferences — nothing authenticates
   — so they report what is *exposed*, not that it is broken.
 - Colour-coded rows: red = dead, green = alive, blue = open ports
+- **A map of the network**, not just a list: the gateway at the centre,
+  everything else orbiting it, with **distance from the centre showing
+  round-trip time** and **size showing how many ports are open**. A device
+  keeps its position between scans. Hover for detail, click to select.
 - **Filter as you type** (⌘F): plain text searches the whole row, `port:22`,
   `vendor:apple`, `name:`, `via:` and friends search one field, and bare words
   like `new`, `unknown`, `risk` or `-dead` match what a row *is*. Terms combine.

@@ -15,6 +15,9 @@
   --badge-new: #1f7a3a;
   --badge-change: #b35900;
   --badge-gone: #8a8580;
+  /* Reserved status hue from the viz palette: 4.68:1 on white. */
+  --risk: #d03b3b;
+  --node-fill: #f4f3f1;
   color-scheme: light;
 }
 
@@ -35,6 +38,8 @@
     --badge-new: #3fae63;
     --badge-change: #e08a2e;
     --badge-gone: #77716b;
+    --risk: #d03b3b;
+    --node-fill: #34322f;
     color-scheme: dark;
   }
 }
@@ -515,3 +520,91 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-
 .minus { color: var(--accent); font-weight: 600; }
 
 .error-text { color: var(--accent); }
+
+/* -- network map ---------------------------------------------------------- */
+
+/* One status hue (critical) carries "worth a look"; everything else is ink,
+   line style and geometry, so nothing depends on colour alone. */
+.map-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.map { display: block; width: 100%; height: 100%; }
+
+.map .ring { fill: none; stroke: var(--border); stroke-width: 1; }
+.map .ring-label {
+  fill: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+}
+
+.map .spoke { stroke: var(--border); stroke-width: 1; opacity: 0.7; }
+.map .spoke.risk { stroke: var(--risk); opacity: 0.5; }
+
+.map .node {
+  fill: var(--node-fill);
+  stroke: var(--text);
+  stroke-width: 2;
+  cursor: pointer;
+}
+.map .node.self { fill: var(--select); }
+.map .node.hub { fill: var(--head); stroke-width: 2.5; }
+/* Line style, not hue: unapproved reads in greyscale and in forced colours. */
+.map .node.unapproved { stroke-dasharray: 4 3; }
+.map .node.risk { stroke: var(--risk); }
+.map .node:hover, .map .node.selected { fill: var(--accent); stroke: var(--accent); }
+
+.map .label {
+  fill: var(--text);
+  font-size: 11px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.map .label.dim { fill: var(--muted); }
+
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--text);
+}
+.legend i {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
+  border-radius: 50%;
+  border: 2px solid var(--text);
+  background: var(--node-fill);
+  vertical-align: 0;
+}
+.legend i.risk { border-color: var(--risk); }
+.legend i.dashed { border-style: dashed; }
+
+.maptip {
+  position: absolute;
+  z-index: 6;
+  max-width: 260px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  pointer-events: none;
+}
+.maptip strong { font-variant-numeric: tabular-nums; }
+.maptip div { color: var(--muted); }
+
+.views { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.views .view { border: none; border-radius: 0; background: var(--input); padding: 3px 12px; }
+.views .view.active { background: var(--accent); color: var(--accent-text); font-weight: 600; }

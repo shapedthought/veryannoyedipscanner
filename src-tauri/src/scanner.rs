@@ -49,6 +49,9 @@ pub struct Range {
     pub start: String,
     pub end: String,
     pub cidr: String,
+    /// This machine's own address, so the map can say which one is you.
+    #[serde(rename = "self")]
+    pub own: String,
 }
 
 /// Everything the user can tune about a scan.
@@ -235,6 +238,7 @@ pub fn cidr_range(cidr: &str) -> Result<Range, String> {
         start: Ipv4Addr::from(start).to_string(),
         end: Ipv4Addr::from(end).to_string(),
         cidr: format!("{}/{}", Ipv4Addr::from(net), prefix),
+        own: String::new(),
     })
 }
 
@@ -256,7 +260,10 @@ pub fn local_ip() -> Option<Ipv4Addr> {
 
 pub fn local_range() -> Range {
     let ip = local_ip().map_or_else(|| "192.168.1.1".to_string(), |ip| ip.to_string());
-    cidr_range(&format!("{ip}/24")).expect("valid /24")
+    Range {
+        own: ip.clone(),
+        ..cidr_range(&format!("{ip}/24")).expect("valid /24")
+    }
 }
 
 // --------------------------------------------------------------------------
