@@ -14,6 +14,7 @@ mod risk;
 mod scanner;
 mod tray;
 mod vendor;
+mod watches;
 mod webhook;
 
 use devices::Device;
@@ -32,6 +33,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use watches::{Transition, Watch};
 
 #[derive(Default)]
 struct ScanState {
@@ -271,6 +273,10 @@ fn save_and_diff(
     let mut conn = db.conn()?;
     let id = history::save(&mut conn, &summary, hosts).map_err(db_err)?;
     devices::record_sightings(&mut conn, hosts, summary.finished_at).map_err(db_err)?;
+    for host in hosts.iter().filter(|h| h.alive) {
+        watches::follow(&conn, summary.profile_id, &devices::key_for(host), &host.ip)
+            .map_err(db_err)?;
+    }
     summary.id = id;
     let Some(base_id) = history::baseline_for(&conn, &summary).map_err(db_err)? else {
         return Ok((id, None));
@@ -456,6 +462,81 @@ fn device_history(db: State<'_, Db>, key: String, ip: String) -> Result<DeviceHi
     history::device_history(&*db.conn()?, &key, &ip).map_err(db_err)
 }
 
+#[derive(Serialize)]
+struct WatchState {
+    watch: Watch,
+    /// Recent checks as (time, up) pairs, for drawing what today looked like.
+    checks: Vec<(i64, bool)>,
+}
+
+#[tauri::command]
+fn list_watches(db: State<'_, Db>, profile_id: Option<i64>) -> Result<Vec<WatchState>, String> {
+    let conn = db.conn()?;
+    watches::list(&conn, profile_id)
+        .map_err(db_err)?
+        .into_iter()
+        .map(|watch| {
+            let checks = watches::checks(&conn, watch.id).map_err(db_err)?;
+            Ok(WatchState { watch, checks })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn add_watch(
+    db: State<'_, Db>,
+    profile_id: Option<i64>,
+    key: String,
+    ip: String,
+    port: Option<u16>,
+    label: String,
+) -> Result<Watch, String> {
+    watches::add(&*db.conn()?, profile_id, &key, &ip, port, &label).map_err(db_err)
+}
+
+#[tauri::command]
+fn remove_watch(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    watches::remove(&*db.conn()?, id).map_err(db_err)
+}
+
+/// Check every watch on this network. Returns their current state, and the
+/// ones that just changed - which is all the UI needs to announce.
+#[tauri::command]
+async fn check_watches(
+    app: AppHandle,
+    profile_id: Option<i64>,
+    options: Options,
+) -> Result<Vec<Transition>, String> {
+    let options = options.sanitised();
+    let watching = {
+        let db = app.state::<Db>();
+        let conn = db.conn()?;
+        watches::list(&conn, profile_id).map_err(db_err)?
+    };
+
+    // Probe them together: a handful of hosts, and a slow one shouldn't hold
+    // up the rest.
+    let probes = watching.into_iter().map(|watch| async {
+        let up = match watch.ip.parse() {
+            Ok(ip) => scanner::check_alive(ip, watch.port, &options).await,
+            Err(_) => false,
+        };
+        (watch, up)
+    });
+    let results = futures::future::join_all(probes).await;
+
+    let now = now_ms();
+    let db = app.state::<Db>();
+    let conn = db.conn()?;
+    let mut transitions = Vec::new();
+    for (watch, up) in results {
+        if let Some(transition) = watches::record(&conn, &watch, up, now).map_err(db_err)? {
+            transitions.push(transition);
+        }
+    }
+    Ok(transitions)
+}
+
 #[tauri::command]
 fn list_devices(db: State<'_, Db>) -> Result<Vec<Device>, String> {
     devices::list(&*db.conn()?).map_err(db_err)
@@ -553,6 +634,10 @@ fn main() {
             notify,
             update_tray,
             device_history,
+            list_watches,
+            add_watch,
+            remove_watch,
+            check_watches,
             list_devices,
             approvals_in_use,
             set_device_label,
